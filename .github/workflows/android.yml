@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master" ]
     tags:
-      - 'v*' # Trigger on version tags (e.g., v1.0.0)
+      - 'v*'
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -25,7 +25,7 @@ on:
         default: false
 
 permissions:
-  contents: write # Required for creating releases and uploading assets
+  contents: write
 
 jobs:
   build:
@@ -41,15 +41,14 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-        # આ step જ missing હતો. Linux પર ./gradlew run કરવા માટે જરૂરી
+        with:
+          gradle-version: 8.4
+          # આનાથી wrapper.jar corrupt હોય તો પણ ચાલશે
 
       - name: Decode Debug Keystore
         run: |
@@ -62,7 +61,6 @@ jobs:
 
       - name: Configure Environment Variables
         run: |
-          # Create an empty .env file if it doesn't exist so Secrets Plugin doesn't complain
           if [ ! -f .env ]; then
             touch .env
           fi
@@ -72,7 +70,8 @@ jobs:
           github.event_name == 'push' || 
           github.event_name == 'pull_request' || 
           (github.event_name == 'workflow_dispatch' && (github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both'))
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon --stacktrace
+        # ./gradlew ને બદલે gradle લખ્યું - wrapper.jar ની જરૂર નહીં
 
       - name: Prepare and Build Release APK
         if: |
@@ -93,18 +92,16 @@ jobs:
           
           echo "Building Release APK..."
           export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          gradle assembleRelease --no-daemon --stacktrace
 
       - name: Rename & Organize APKs
         run: |
           mkdir -p build-artifacts
           if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
             cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/autoclicker-pro-debug.apk
-            echo "Debug APK copied."
           fi
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
             cp app/build/outputs/apk/release/app-release.apk build-artifacts/autoclicker-pro-release.apk
-            echo "Release APK copied."
           fi
 
       - name: Generate Release Notes
@@ -114,14 +111,12 @@ jobs:
         run: |
           echo "### AutoClicker Pro Automated Release" > release_notes.md
           echo "" >> release_notes.md
-          echo "This release was automatically compiled and packaged via GitHub Actions CI/CD." >> release_notes.md
-          echo "" >> release_notes.md
           echo "#### Artifacts Included" >> release_notes.md
           if [ -f build-artifacts/autoclicker-pro-debug.apk ]; then
-            echo "- **autoclicker-pro-debug.apk**: Debug build, ready to install for testing." >> release_notes.md
+            echo "- **autoclicker-pro-debug.apk**: Debug build" >> release_notes.md
           fi
           if [ -f build-artifacts/autoclicker-pro-release.apk ]; then
-            echo "- **autoclicker-pro-release.apk**: Production-ready Release build." >> release_notes.md
+            echo "- **autoclicker-pro-release.apk**: Release build" >> release_notes.md
           fi
           echo "" >> release_notes.md
           echo "#### SHA-256 Checksums" >> release_notes.md
