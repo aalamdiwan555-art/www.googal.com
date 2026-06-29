@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Outer dashed target ring -->
+    <path
+        android:strokeColor="#FF9800"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M 54 22 A 32 32 0 1 1 53.99 22 Z" />
+        
+    <!-- Inner solid target ring -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:fillColor="#24FFFFFF"
+        android:pathData="M 54 36 A 18 18 0 1 1 53.99 36 Z" />
+        
+    <!-- Bullseye central dot -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M 54 50 A 4 4 0 1 1 53.99 50 Z" />
+
+    <!-- Sleek cursor clicking the target -->
+    <!-- Starts at 54,54 pointing directly to the center of the target -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#121216"
+        android:strokeWidth="1"
+        android:pathData="M 54,54 L 70,70 L 63,72 L 71,88 L 65,91 L 57,75 L 50,82 Z" />
+</vector>

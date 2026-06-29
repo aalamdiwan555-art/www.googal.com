@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AutoClicker Pro</string>
+    <string name="accessibility_service_label">AutoClicker Pro - Click Engine</string>
+    <string name="accessibility_service_description">AutoClicker Pro uses gestures to automate repetitive tasks and provide accessibility assistance on your screen.</string>
+</resources>

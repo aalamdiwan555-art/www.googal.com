@@ -1,0 +1,147 @@
+name: Android CI/CD - Build & Release APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v1.0.0)
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - 'debug'
+          - 'release'
+          - 'both'
+      create_release:
+        description: 'Create a GitHub Release? (Only applicable on manual dispatch)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # Required for creating releases and uploading assets
+
+jobs:
+  build:
+    name: Build Android App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Decode Debug Keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            echo "Decoding debug keystore..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          else
+            echo "Warning: debug.keystore.base64 not found!"
+          fi
+
+      - name: Configure Environment Variables
+        run: |
+          # Create an empty .env file if it doesn't exist so Secrets Plugin doesn't complain
+          if [ ! -f .env ]; then
+            touch .env
+          fi
+
+      - name: Build Debug APK
+        if: |
+          github.event_name == 'push' || 
+          github.event_name == 'pull_request' || 
+          (github.event_name == 'workflow_dispatch' && (github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both'))
+        run: ./gradlew assembleDebug
+
+      - name: Prepare and Build Release APK
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || 
+          (github.event_name == 'workflow_dispatch' && (github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both'))
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "::warning::RELEASE_KEYSTORE_BASE64 secret is missing. Skipping signed Release APK build."
+            exit 0
+          fi
+          
+          echo "Decoding release keystore..."
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+          
+          echo "Building Release APK..."
+          export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
+          ./gradlew assembleRelease
+
+      - name: Rename & Organize APKs
+        run: |
+          mkdir -p build-artifacts
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/autoclicker-pro-debug.apk
+            echo "Debug APK copied."
+          fi
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk build-artifacts/autoclicker-pro-release.apk
+            echo "Release APK copied."
+          fi
+
+      - name: Generate Release Notes
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        run: |
+          echo "### AutoClicker Pro Automated Release" > release_notes.md
+          echo "" >> release_notes.md
+          echo "This release was automatically compiled and packaged via GitHub Actions CI/CD." >> release_notes.md
+          echo "" >> release_notes.md
+          echo "#### Artifacts Included" >> release_notes.md
+          if [ -f build-artifacts/autoclicker-pro-debug.apk ]; then
+            echo "- **autoclicker-pro-debug.apk**: Debug build, ready to install for testing." >> release_notes.md
+          fi
+          if [ -f build-artifacts/autoclicker-pro-release.apk ]; then
+            echo "- **autoclicker-pro-release.apk**: Production-ready Release build." >> release_notes.md
+          fi
+          echo "" >> release_notes.md
+          echo "#### SHA-256 Checksums" >> release_notes.md
+          echo "\`\`\`text" >> release_notes.md
+          sha256sum build-artifacts/*.apk | sed 's|build-artifacts/||' >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoClicker-Pro-APKs
+          path: build-artifacts/
+          if-no-files-found: warn
+
+      - name: Create GitHub Release
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-artifacts/*.apk
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          name: Release ${{ github.ref_name || 'Manual-Build' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
