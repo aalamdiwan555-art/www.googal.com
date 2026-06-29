@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "AutoClicker Pro"
+rootProject.name = "My Application"
 
 include(":app")

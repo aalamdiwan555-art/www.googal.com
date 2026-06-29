@@ -273,7 +273,7 @@ fun EngineConfigView(config: ClickConfig, viewModel: MainViewModel) {
                     )
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    ClickMode.entries.forEach { mode ->
+                    ClickMode.values().forEach { mode ->
                         val isSelected = clickMode == mode
                         Row(
                             modifier = Modifier
@@ -296,7 +296,7 @@ fun EngineConfigView(config: ClickConfig, viewModel: MainViewModel) {
                                 colors = RadioButtonDefaults.colors(selectedColor = Color(0xFFFF9800))
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                          Column {
+                            Column {
                                 Text(
                                     text = when (mode) {
                                         ClickMode.FIXED_POINT -> "📌 Fixed Position"
@@ -398,7 +398,7 @@ fun EngineConfigView(config: ClickConfig, viewModel: MainViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        ClickType.entries.forEach { type ->
+                        ClickType.values().forEach { type ->
                             val isSelected = clickType == type
                             Button(
                                 onClick = {
