@@ -1,21 +1,16 @@
 package com.example
 
-import android.content.Context
-import androidx.test.core.app.ApplicationProvider
-import org.junit.Assert.assertEquals
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
-class ExampleRobolectricTest {
-
+@RunWith(AndroidJUnit4::class)
+class ExampleInstrumentedTest {
   @Test
-  fun `read string from context`() {
-    val context = ApplicationProvider.getApplicationContext<Context>()
-    val appName = context.getString(R.string.app_name)
-    assertEquals("AutoClicker Pro", appName)
+  fun useAppContext() {
+    val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+    assertEquals("com.aistudio.autoclickerpro.vtxwsy", appContext.packageName)
   }
 }
