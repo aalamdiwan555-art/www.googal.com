@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master" ]
     tags:
-      - 'v*' # Trigger on version tags (e.g., v1.0.0)
+      - 'v*'
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -25,7 +25,7 @@ on:
         default: false
 
 permissions:
-  contents: write # Required for creating releases and uploading assets
+  contents: write
 
 jobs:
   build:
@@ -41,34 +41,48 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 35
+          build-tools: 35.0.0
 
-      - name: Decode Debug Keystore
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Generate Debug Keystore
         run: |
-          if [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug keystore..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          else
-            echo "Warning: debug.keystore.base64 not found!"
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated debug.keystore"
           fi
 
-      - name: Configure Environment Variables
+      - name: Create .env file
         run: |
-          # Create an empty .env file if it doesn't exist so Secrets Plugin doesn't complain
           if [ ! -f .env ]; then
-            touch .env
+            echo "GEMINI_API_KEY=" > .env
+            echo "Created empty .env file"
           fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
 
       - name: Build Debug APK
         if: |
           github.event_name == 'push' || 
           github.event_name == 'pull_request' || 
           (github.event_name == 'workflow_dispatch' && (github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both'))
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Prepare and Build Release APK
         if: |
@@ -78,6 +92,7 @@ jobs:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
             echo "::warning::RELEASE_KEYSTORE_BASE64 secret is missing. Skipping signed Release APK build."
@@ -88,8 +103,8 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
           
           echo "Building Release APK..."
-          export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
-          ./gradlew assembleRelease
+          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
+          ./gradlew assembleRelease --stacktrace
 
       - name: Rename & Organize APKs
         run: |
@@ -145,3 +160,4 @@ jobs:
           name: Release ${{ github.ref_name || 'Manual-Build' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
