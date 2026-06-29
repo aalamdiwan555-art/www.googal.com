@@ -47,6 +47,10 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+        # આ step જ missing હતો. Linux પર ./gradlew run કરવા માટે જરૂરી
+
       - name: Decode Debug Keystore
         run: |
           if [ -f debug.keystore.base64 ]; then
@@ -68,7 +72,7 @@ jobs:
           github.event_name == 'push' || 
           github.event_name == 'pull_request' || 
           (github.event_name == 'workflow_dispatch' && (github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both'))
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Prepare and Build Release APK
         if: |
@@ -89,7 +93,7 @@ jobs:
           
           echo "Building Release APK..."
           export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Rename & Organize APKs
         run: |
