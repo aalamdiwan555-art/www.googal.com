@@ -10,6 +10,7 @@ lifecycleViewmodelCompose = "2.7.0"
 lifecycleRuntimeCompose = "2.7.0"
 activityCompose = "1.8.2"
 composeBom = "2023.10.01"
+composeCompiler = "1.5.4"
 googleDevtoolsKsp = "1.9.10-1.0.13"
 navigationCompose = "2.7.6"
 roomRuntime = "2.6.1"
@@ -93,7 +94,6 @@ firebase-appcheck-recaptcha = { group = "com.google.firebase", name = "firebase-
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 google-devtools-ksp = { id = "com.google.devtools.ksp", version.ref = "googleDevtoolsKsp" }
 roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }
 secrets = { id = "com.google.android.libraries.mapsplatform.secrets-gradle-plugin", version.ref = "secretsGradlePlugin" }
