@@ -19,7 +19,7 @@ class PriceFilterEngine(private val context: Context) {
     private val TAG = "PriceFilterEngine"
     
     // Multi-currency price extractor regex (matches currency symbols + numeric price)
-    private val priceRegex = Regex("""(?:Price|Fare|Earn|Est\.|Total|Cost)?\s*[₹$€£]\s*([\d,]+(?:\.\d{2})?)""", RegexOption.IGNORE_CASE)
+    private val priceRegex = Regex("""(?:Price|Fare|Earn|Est\.|Total|Cost)?\s*[₹$€£]\s*([\d,]+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
 
     fun extractPriceFromText(text: String): Double? {
         val match = priceRegex.find(text)
@@ -27,7 +27,7 @@ class PriceFilterEngine(private val context: Context) {
             return match.groupValues[1].replace(",", "").toDoubleOrNull()
         }
         // Fallback search for bare numbers if they look like prices
-        val numbers = Regex("""\b\d+(?:\.\d{2})?\b""").findAll(text)
+        val numbers = Regex("""\b\d+(?:\.\d+)?\b""").findAll(text)
         for (num in numbers) {
             val d = num.value.toDoubleOrNull()
             if (d != null && d > 1.0) {
@@ -35,7 +35,10 @@ class PriceFilterEngine(private val context: Context) {
                 val index = text.indexOf(num.value)
                 if (index != -1) {
                     val afterSub = text.substring(index + num.value.length).trimStart()
-                    if (afterSub.startsWith("km", ignoreCase = true) || afterSub.startsWith("kms", ignoreCase = true)) {
+                    if (afterSub.startsWith("km", ignoreCase = true) || 
+                        afterSub.startsWith("kms", ignoreCase = true) ||
+                        afterSub.startsWith("mi", ignoreCase = true) ||
+                        afterSub.startsWith("mile", ignoreCase = true)) {
                         continue // Skip distance
                     }
                 }
@@ -46,13 +49,26 @@ class PriceFilterEngine(private val context: Context) {
     }
 
     fun extractDistancesFromText(text: String): Pair<Double?, Double?> {
-        val distanceRegex = Regex("""(\d+(?:\.\d+)?)\s*[Kk]m[sS]?""")
+        val distanceRegex = Regex("""(\d+(?:\.\d+)?)\s*(?:[Kk]m[sS]?|[Mm]i(?:les?)?)""")
         val matches = distanceRegex.findAll(text).toList()
         
         val pickup = if (matches.isNotEmpty()) matches[0].groupValues[1].toDoubleOrNull() else null
         val drop = if (matches.size > 1) matches[1].groupValues[1].toDoubleOrNull() else null
         
         return Pair(pickup, drop)
+    }
+
+    private fun isStrictMatch(nodeText: String, term: String): Boolean {
+        val cleanNodeText = nodeText.trim()
+        val cleanTerm = term.trim()
+        if (cleanNodeText.equals(cleanTerm, ignoreCase = true)) {
+            return true
+        }
+        if (cleanTerm.length <= 4) {
+            val regex = Regex("\\b${Regex.escape(cleanTerm)}\\b", RegexOption.IGNORE_CASE)
+            return regex.containsMatchIn(cleanNodeText)
+        }
+        return cleanNodeText.contains(cleanTerm, ignoreCase = true)
     }
 
     fun shouldClick(screenText: String, config: PriceConfig): Boolean {
@@ -285,63 +301,78 @@ class PriceFilterEngine(private val context: Context) {
         if (root != null) {
             try {
                 for (term in acceptTerms) {
-                    val nodes = root.findAccessibilityNodeInfosByText(term)
-                    if (!nodes.isNullOrEmpty()) {
-                        // Prioritize clickable nodes or nodes with clickable parents
-                        var bestNode = nodes.find { it.isClickable }
-                        if (bestNode == null) {
-                            bestNode = nodes.find {
-                                var hasClickableParent = false
-                                var parent = it.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        hasClickableParent = true
-                                        parent.recycle()
-                                        break
-                                    }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
-                                }
-                                hasClickableParent
-                            }
-                        }
-                        val node = bestNode ?: nodes[0]
-                        val rect = Rect()
-                        node.getBoundsInScreen(rect)
-
-                        // Click at random point inside bounds to simulate human finger touch (different positions)
-                        val clickX = rect.left + Random.nextInt(maxOf(1, (rect.width() * 0.8).toInt())) + (rect.width() * 0.1).toInt()
-                        val clickY = rect.top + Random.nextInt(maxOf(1, (rect.height() * 0.8).toInt())) + (rect.height() * 0.1).toInt()
-
-                        val delayMs = Random.nextLong(1, 101) // Anti-detection random delay between 1ms and 100ms
-                        RideAutomationLogger.log("⚡ [Anti-Detection Delay] Accessibility element '$term' matched! Clicking Accept Button in ${delayMs}ms at random offset ($clickX, $clickY)")
-                        delay(delayMs)
-                        
-                        // Dual-dispatch accept: physical tap + accessibility direct action click for 100% reliability
-                        service.clickAt(clickX.toFloat(), clickY.toFloat())
-                        try {
-                            if (node.isClickable) {
-                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    val rawNodes = root.findAccessibilityNodeInfosByText(term)
+                    if (!rawNodes.isNullOrEmpty()) {
+                        val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
+                        val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
+                        for (node in rawNodes) {
+                            val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+                            if (isStrictMatch(nodeText, term)) {
+                                matchingNodes.add(node)
                             } else {
-                                var parent = node.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                rejectedNodes.add(node)
+                            }
+                        }
+                        
+                        rejectedNodes.forEach { it.recycle() }
+                        
+                        if (matchingNodes.isNotEmpty()) {
+                            // Prioritize clickable nodes or nodes with clickable parents
+                            var bestNode = matchingNodes.find { it.isClickable }
+                            if (bestNode == null) {
+                                bestNode = matchingNodes.find {
+                                    var hasClickableParent = false
+                                    var parent = it.parent
+                                    while (parent != null) {
+                                        if (parent.isClickable) {
+                                            hasClickableParent = true
+                                            parent.recycle()
+                                            break
+                                        }
+                                        val temp = parent.parent
                                         parent.recycle()
-                                        break
+                                        parent = temp
                                     }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
+                                    hasClickableParent
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error performing direct node click action", e)
-                        }
+                            val node = bestNode ?: matchingNodes[0]
+                            val rect = Rect()
+                            node.getBoundsInScreen(rect)
 
-                        nodes.forEach { it.recycle() }
-                        return true
+                            // Click at random point inside bounds to simulate human finger touch (different positions)
+                            val clickX = rect.left + Random.nextInt(maxOf(1, (rect.width() * 0.8).toInt())) + (rect.width() * 0.1).toInt()
+                            val clickY = rect.top + Random.nextInt(maxOf(1, (rect.height() * 0.8).toInt())) + (rect.height() * 0.1).toInt()
+
+                            val delayMs = Random.nextLong(1, 101) // Anti-detection random delay between 1ms and 100ms
+                            RideAutomationLogger.log("⚡ [Anti-Detection Delay] Accessibility element '$term' matched! Clicking Accept Button in ${delayMs}ms at random offset ($clickX, $clickY)")
+                            delay(delayMs)
+                            
+                            // Dual-dispatch accept: physical tap + accessibility direct action click for 100% reliability
+                            service.clickAt(clickX.toFloat(), clickY.toFloat())
+                            try {
+                                if (node.isClickable) {
+                                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                } else {
+                                    var parent = node.parent
+                                    while (parent != null) {
+                                        if (parent.isClickable) {
+                                            parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                            parent.recycle()
+                                            break
+                                        }
+                                        val temp = parent.parent
+                                        parent.recycle()
+                                        parent = temp
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error performing direct node click action", e)
+                            }
+
+                            matchingNodes.forEach { it.recycle() }
+                            return true
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -361,63 +392,78 @@ class PriceFilterEngine(private val context: Context) {
         if (root != null) {
             try {
                 for (term in rejectTerms) {
-                    val nodes = root.findAccessibilityNodeInfosByText(term)
-                    if (!nodes.isNullOrEmpty()) {
-                        // Prioritize clickable nodes or nodes with clickable parents
-                        var bestNode = nodes.find { it.isClickable }
-                        if (bestNode == null) {
-                            bestNode = nodes.find {
-                                var hasClickableParent = false
-                                var parent = it.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        hasClickableParent = true
-                                        parent.recycle()
-                                        break
-                                    }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
-                                }
-                                hasClickableParent
-                            }
-                        }
-                        val node = bestNode ?: nodes[0]
-                        val rect = Rect()
-                        node.getBoundsInScreen(rect)
-                        
-                        // Click at random point inside bounds
-                        val clickX = rect.left + Random.nextInt(maxOf(1, (rect.width() * 0.8).toInt())) + (rect.width() * 0.1).toInt()
-                        val clickY = rect.top + Random.nextInt(maxOf(1, (rect.height() * 0.8).toInt())) + (rect.height() * 0.1).toInt()
-                        
-                        val delayMs = Random.nextLong(config.randomClickDelayMinMs, config.randomClickDelayMaxMs)
-                        RideAutomationLogger.log("🚫 Clicking Reject Button '$term' in ${delayMs}ms at random offset ($clickX, $clickY)")
-                        delay(delayMs)
-                        service.clickAt(clickX.toFloat(), clickY.toFloat())
-                        
-                        // Try direct accessibility action click on reject too for completeness
-                        try {
-                            if (node.isClickable) {
-                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    val rawNodes = root.findAccessibilityNodeInfosByText(term)
+                    if (!rawNodes.isNullOrEmpty()) {
+                        val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
+                        val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
+                        for (node in rawNodes) {
+                            val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+                            if (isStrictMatch(nodeText, term)) {
+                                matchingNodes.add(node)
                             } else {
-                                var parent = node.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                rejectedNodes.add(node)
+                            }
+                        }
+                        
+                        rejectedNodes.forEach { it.recycle() }
+                        
+                        if (matchingNodes.isNotEmpty()) {
+                            // Prioritize clickable nodes or nodes with clickable parents
+                            var bestNode = matchingNodes.find { it.isClickable }
+                            if (bestNode == null) {
+                                bestNode = matchingNodes.find {
+                                    var hasClickableParent = false
+                                    var parent = it.parent
+                                    while (parent != null) {
+                                        if (parent.isClickable) {
+                                            hasClickableParent = true
+                                            parent.recycle()
+                                            break
+                                        }
+                                        val temp = parent.parent
                                         parent.recycle()
-                                        break
+                                        parent = temp
                                     }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
+                                    hasClickableParent
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error performing direct reject click action", e)
-                        }
+                            val node = bestNode ?: matchingNodes[0]
+                            val rect = Rect()
+                            node.getBoundsInScreen(rect)
+                            
+                            // Click at random point inside bounds
+                            val clickX = rect.left + Random.nextInt(maxOf(1, (rect.width() * 0.8).toInt())) + (rect.width() * 0.1).toInt()
+                            val clickY = rect.top + Random.nextInt(maxOf(1, (rect.height() * 0.8).toInt())) + (rect.height() * 0.1).toInt()
+                            
+                            val delayMs = Random.nextLong(config.randomClickDelayMinMs, config.randomClickDelayMaxMs)
+                            RideAutomationLogger.log("🚫 Clicking Reject Button '$term' in ${delayMs}ms at random offset ($clickX, $clickY)")
+                            delay(delayMs)
+                            service.clickAt(clickX.toFloat(), clickY.toFloat())
+                            
+                            // Try direct accessibility action click on reject too for completeness
+                            try {
+                                if (node.isClickable) {
+                                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                } else {
+                                    var parent = node.parent
+                                    while (parent != null) {
+                                        if (parent.isClickable) {
+                                            parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                            parent.recycle()
+                                            break
+                                        }
+                                        val temp = parent.parent
+                                        parent.recycle()
+                                        parent = temp
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error performing direct reject click action", e)
+                            }
 
-                        nodes.forEach { it.recycle() }
-                        return true
+                            matchingNodes.forEach { it.recycle() }
+                            return true
+                        }
                     }
                 }
             } catch (e: Exception) {
