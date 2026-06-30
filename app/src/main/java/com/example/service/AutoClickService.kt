@@ -230,40 +230,110 @@ class AutoClickService : AccessibilityService() {
             if (!viewId.isNullOrBlank()) {
                 val nodes = root.findAccessibilityNodeInfosByViewId(viewId)
                 if (!nodes.isNullOrEmpty()) {
-                    for (node in nodes) {
-                        if (node.isClickable) {
-                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            nodes.forEach { it.recycle() }
-                            return true
-                        } else {
-                            val rect = Rect()
-                            node.getBoundsInScreen(rect)
-                            clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
-                            nodes.forEach { it.recycle() }
-                            return true
+                    // Prioritize clickable nodes or nodes with clickable parents
+                    var bestNode = nodes.find { it.isClickable }
+                    if (bestNode == null) {
+                        bestNode = nodes.find {
+                            var hasClickableParent = false
+                            var parent = it.parent
+                            while (parent != null) {
+                                if (parent.isClickable) {
+                                    hasClickableParent = true
+                                    parent.recycle()
+                                    break
+                                }
+                                val temp = parent.parent
+                                parent.recycle()
+                                parent = temp
+                            }
+                            hasClickableParent
                         }
                     }
+                    val node = bestNode ?: nodes[0]
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    
+                    // Human-like physical click at center
+                    clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
+                    
+                    // Direct action click (including parents)
+                    try {
+                        if (node.isClickable) {
+                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        } else {
+                            var parent = node.parent
+                            while (parent != null) {
+                                if (parent.isClickable) {
+                                    parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                    parent.recycle()
+                                    break
+                                }
+                                val temp = parent.parent
+                                parent.recycle()
+                                parent = temp
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AutoClickService", "Direct viewId click failed", e)
+                    }
+                    
                     nodes.forEach { it.recycle() }
+                    return true
                 }
             }
 
             if (!text.isNullOrBlank()) {
                 val nodes = root.findAccessibilityNodeInfosByText(text)
                 if (!nodes.isNullOrEmpty()) {
-                    for (node in nodes) {
-                        if (node.isClickable) {
-                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            nodes.forEach { it.recycle() }
-                            return true
-                        } else {
-                            val rect = Rect()
-                            node.getBoundsInScreen(rect)
-                            clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
-                            nodes.forEach { it.recycle() }
-                            return true
+                    // Prioritize clickable nodes or nodes with clickable parents
+                    var bestNode = nodes.find { it.isClickable }
+                    if (bestNode == null) {
+                        bestNode = nodes.find {
+                            var hasClickableParent = false
+                            var parent = it.parent
+                            while (parent != null) {
+                                if (parent.isClickable) {
+                                    hasClickableParent = true
+                                    parent.recycle()
+                                    break
+                                }
+                                val temp = parent.parent
+                                parent.recycle()
+                                parent = temp
+                            }
+                            hasClickableParent
                         }
                     }
+                    val node = bestNode ?: nodes[0]
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    
+                    // Human-like physical click at center
+                    clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
+                    
+                    // Direct action click (including parents)
+                    try {
+                        if (node.isClickable) {
+                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        } else {
+                            var parent = node.parent
+                            while (parent != null) {
+                                if (parent.isClickable) {
+                                    parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                    parent.recycle()
+                                    break
+                                }
+                                val temp = parent.parent
+                                parent.recycle()
+                                parent = temp
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AutoClickService", "Direct text click failed", e)
+                    }
+                    
                     nodes.forEach { it.recycle() }
+                    return true
                 }
             }
         } catch (e: Exception) {

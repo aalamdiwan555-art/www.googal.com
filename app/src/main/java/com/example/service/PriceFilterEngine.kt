@@ -287,7 +287,26 @@ class PriceFilterEngine(private val context: Context) {
                 for (term in acceptTerms) {
                     val nodes = root.findAccessibilityNodeInfosByText(term)
                     if (!nodes.isNullOrEmpty()) {
-                        val node = nodes[0]
+                        // Prioritize clickable nodes or nodes with clickable parents
+                        var bestNode = nodes.find { it.isClickable }
+                        if (bestNode == null) {
+                            bestNode = nodes.find {
+                                var hasClickableParent = false
+                                var parent = it.parent
+                                while (parent != null) {
+                                    if (parent.isClickable) {
+                                        hasClickableParent = true
+                                        parent.recycle()
+                                        break
+                                    }
+                                    val temp = parent.parent
+                                    parent.recycle()
+                                    parent = temp
+                                }
+                                hasClickableParent
+                            }
+                        }
+                        val node = bestNode ?: nodes[0]
                         val rect = Rect()
                         node.getBoundsInScreen(rect)
 
@@ -344,7 +363,26 @@ class PriceFilterEngine(private val context: Context) {
                 for (term in rejectTerms) {
                     val nodes = root.findAccessibilityNodeInfosByText(term)
                     if (!nodes.isNullOrEmpty()) {
-                        val node = nodes[0]
+                        // Prioritize clickable nodes or nodes with clickable parents
+                        var bestNode = nodes.find { it.isClickable }
+                        if (bestNode == null) {
+                            bestNode = nodes.find {
+                                var hasClickableParent = false
+                                var parent = it.parent
+                                while (parent != null) {
+                                    if (parent.isClickable) {
+                                        hasClickableParent = true
+                                        parent.recycle()
+                                        break
+                                    }
+                                    val temp = parent.parent
+                                    parent.recycle()
+                                    parent = temp
+                                }
+                                hasClickableParent
+                            }
+                        }
+                        val node = bestNode ?: nodes[0]
                         val rect = Rect()
                         node.getBoundsInScreen(rect)
                         
@@ -356,6 +394,28 @@ class PriceFilterEngine(private val context: Context) {
                         RideAutomationLogger.log("🚫 Clicking Reject Button '$term' in ${delayMs}ms at random offset ($clickX, $clickY)")
                         delay(delayMs)
                         service.clickAt(clickX.toFloat(), clickY.toFloat())
+                        
+                        // Try direct accessibility action click on reject too for completeness
+                        try {
+                            if (node.isClickable) {
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            } else {
+                                var parent = node.parent
+                                while (parent != null) {
+                                    if (parent.isClickable) {
+                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        parent.recycle()
+                                        break
+                                    }
+                                    val temp = parent.parent
+                                    parent.recycle()
+                                    parent = temp
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error performing direct reject click action", e)
+                        }
+
                         nodes.forEach { it.recycle() }
                         return true
                     }
