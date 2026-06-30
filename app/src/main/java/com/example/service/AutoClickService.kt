@@ -223,6 +223,21 @@ class AutoClickService : AccessibilityService() {
         return cleanNodeText.contains(cleanTerm, ignoreCase = true)
     }
 
+    private fun isClickableOrHasClickableParent(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable) return true
+        var parent = node.parent
+        while (parent != null) {
+            if (parent.isClickable) {
+                parent.recycle()
+                return true
+            }
+            val nextParent = parent.parent
+            parent.recycle()
+            parent = nextParent
+        }
+        return false
+    }
+
     fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300L, onComplete: (() -> Unit)? = null) {
         val path = Path().apply {
             moveTo(startX, startY)
@@ -250,55 +265,56 @@ class AutoClickService : AccessibilityService() {
             if (!viewId.isNullOrBlank()) {
                 val nodes = root.findAccessibilityNodeInfosByViewId(viewId)
                 if (!nodes.isNullOrEmpty()) {
-                    // Prioritize clickable nodes or nodes with clickable parents
-                    var bestNode = nodes.find { it.isClickable }
-                    if (bestNode == null) {
-                        bestNode = nodes.find {
-                            var hasClickableParent = false
-                            var parent = it.parent
-                            while (parent != null) {
-                                if (parent.isClickable) {
-                                    hasClickableParent = true
-                                    parent.recycle()
-                                    break
-                                }
-                                val temp = parent.parent
-                                parent.recycle()
-                                parent = temp
-                            }
-                            hasClickableParent
-                        }
+                    val visibleNodes = nodes.filter { node ->
+                        if (!node.isVisibleToUser) return@filter false
+                        val r = Rect()
+                        node.getBoundsInScreen(r)
+                        r.width() > 0 && r.height() > 0
                     }
-                    val node = bestNode ?: nodes[0]
-                    val rect = Rect()
-                    node.getBoundsInScreen(rect)
-                    
-                    // Human-like physical click at center
-                    clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
-                    
-                    // Direct action click (including parents)
-                    try {
-                        if (node.isClickable) {
-                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        } else {
-                            var parent = node.parent
-                            while (parent != null) {
-                                if (parent.isClickable) {
-                                    parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (visibleNodes.isNotEmpty()) {
+                        val sortedNodes = visibleNodes.map { node ->
+                            val rect = Rect()
+                            node.getBoundsInScreen(rect)
+                            val area = rect.width() * rect.height()
+                            Triple(node, area, isClickableOrHasClickableParent(node))
+                        }.sortedWith(
+                            compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
+                                .thenBy { it.second }
+                        )
+
+                        val bestTriple = sortedNodes.firstOrNull()
+                        val node = bestTriple?.first ?: visibleNodes[0]
+                        val rect = Rect()
+                        node.getBoundsInScreen(rect)
+                        
+                        // Human-like physical click at center
+                        clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
+                        
+                        // Direct action click (including parents)
+                        try {
+                            if (node.isClickable) {
+                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            } else {
+                                var parent = node.parent
+                                while (parent != null) {
+                                    if (parent.isClickable) {
+                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        parent.recycle()
+                                        break
+                                    }
+                                    val temp = parent.parent
                                     parent.recycle()
-                                    break
+                                    parent = temp
                                 }
-                                val temp = parent.parent
-                                parent.recycle()
-                                parent = temp
                             }
+                        } catch (e: Exception) {
+                            Log.e("AutoClickService", "Direct viewId click failed", e)
                         }
-                    } catch (e: Exception) {
-                        Log.e("AutoClickService", "Direct viewId click failed", e)
+                        
+                        nodes.forEach { it.recycle() }
+                        return true
                     }
-                    
                     nodes.forEach { it.recycle() }
-                    return true
                 }
             }
 
@@ -308,6 +324,16 @@ class AutoClickService : AccessibilityService() {
                     val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
                     val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
                     for (node in rawNodes) {
+                        if (!node.isVisibleToUser) {
+                            rejectedNodes.add(node)
+                            continue
+                        }
+                        val r = Rect()
+                        node.getBoundsInScreen(r)
+                        if (r.width() <= 0 || r.height() <= 0) {
+                            rejectedNodes.add(node)
+                            continue
+                        }
                         val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
                         if (isStrictMatch(nodeText, text)) {
                             matchingNodes.add(node)
@@ -319,26 +345,18 @@ class AutoClickService : AccessibilityService() {
                     rejectedNodes.forEach { it.recycle() }
                     
                     if (matchingNodes.isNotEmpty()) {
-                        // Prioritize clickable nodes or nodes with clickable parents
-                        var bestNode = matchingNodes.find { it.isClickable }
-                        if (bestNode == null) {
-                            bestNode = matchingNodes.find {
-                                var hasClickableParent = false
-                                var parent = it.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        hasClickableParent = true
-                                        parent.recycle()
-                                        break
-                                    }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
-                                }
-                                hasClickableParent
-                            }
-                        }
-                        val node = bestNode ?: matchingNodes[0]
+                        val sortedNodes = matchingNodes.map { node ->
+                            val rect = Rect()
+                            node.getBoundsInScreen(rect)
+                            val area = rect.width() * rect.height()
+                            Triple(node, area, isClickableOrHasClickableParent(node))
+                        }.sortedWith(
+                            compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
+                                .thenBy { it.second }
+                        )
+
+                        val bestTriple = sortedNodes.firstOrNull()
+                        val node = bestTriple?.first ?: matchingNodes[0]
                         val rect = Rect()
                         node.getBoundsInScreen(rect)
                         
@@ -394,14 +412,16 @@ class AutoClickService : AccessibilityService() {
     private fun traverseAndCollectText(node: AccessibilityNodeInfo?, sb: StringBuilder) {
         if (node == null) return
         try {
-            node.text?.let {
-                if (it.isNotBlank()) {
-                    sb.append(it).append("\n")
+            if (node.isVisibleToUser) {
+                node.text?.let {
+                    if (it.isNotBlank()) {
+                        sb.append(it).append("\n")
+                    }
                 }
-            }
-            node.contentDescription?.let {
-                if (it.isNotBlank()) {
-                    sb.append(it).append("\n")
+                node.contentDescription?.let {
+                    if (it.isNotBlank()) {
+                        sb.append(it).append("\n")
+                    }
                 }
             }
             val count = node.childCount

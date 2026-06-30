@@ -71,6 +71,21 @@ class PriceFilterEngine(private val context: Context) {
         return cleanNodeText.contains(cleanTerm, ignoreCase = true)
     }
 
+    private fun isClickableOrHasClickableParent(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable) return true
+        var parent = node.parent
+        while (parent != null) {
+            if (parent.isClickable) {
+                parent.recycle()
+                return true
+            }
+            val nextParent = parent.parent
+            parent.recycle()
+            parent = nextParent
+        }
+        return false
+    }
+
     fun shouldClick(screenText: String, config: PriceConfig): Boolean {
         if (!config.enabled) return true
         val price = extractPriceFromText(screenText) ?: return true
@@ -306,6 +321,16 @@ class PriceFilterEngine(private val context: Context) {
                         val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
                         val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
                         for (node in rawNodes) {
+                            if (!node.isVisibleToUser) {
+                                rejectedNodes.add(node)
+                                continue
+                            }
+                            val r = Rect()
+                            node.getBoundsInScreen(r)
+                            if (r.width() <= 0 || r.height() <= 0) {
+                                rejectedNodes.add(node)
+                                continue
+                            }
                             val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
                             if (isStrictMatch(nodeText, term)) {
                                 matchingNodes.add(node)
@@ -317,26 +342,18 @@ class PriceFilterEngine(private val context: Context) {
                         rejectedNodes.forEach { it.recycle() }
                         
                         if (matchingNodes.isNotEmpty()) {
-                            // Prioritize clickable nodes or nodes with clickable parents
-                            var bestNode = matchingNodes.find { it.isClickable }
-                            if (bestNode == null) {
-                                bestNode = matchingNodes.find {
-                                    var hasClickableParent = false
-                                    var parent = it.parent
-                                    while (parent != null) {
-                                        if (parent.isClickable) {
-                                            hasClickableParent = true
-                                            parent.recycle()
-                                            break
-                                        }
-                                        val temp = parent.parent
-                                        parent.recycle()
-                                        parent = temp
-                                    }
-                                    hasClickableParent
-                                }
-                            }
-                            val node = bestNode ?: matchingNodes[0]
+                            val sortedNodes = matchingNodes.map { node ->
+                                val rect = Rect()
+                                node.getBoundsInScreen(rect)
+                                val area = rect.width() * rect.height()
+                                Triple(node, area, isClickableOrHasClickableParent(node))
+                            }.sortedWith(
+                                compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
+                                    .thenBy { it.second }
+                            )
+
+                            val bestTriple = sortedNodes.firstOrNull()
+                            val node = bestTriple?.first ?: matchingNodes[0]
                             val rect = Rect()
                             node.getBoundsInScreen(rect)
 
@@ -397,6 +414,16 @@ class PriceFilterEngine(private val context: Context) {
                         val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
                         val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
                         for (node in rawNodes) {
+                            if (!node.isVisibleToUser) {
+                                rejectedNodes.add(node)
+                                continue
+                            }
+                            val r = Rect()
+                            node.getBoundsInScreen(r)
+                            if (r.width() <= 0 || r.height() <= 0) {
+                                rejectedNodes.add(node)
+                                continue
+                            }
                             val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
                             if (isStrictMatch(nodeText, term)) {
                                 matchingNodes.add(node)
@@ -408,26 +435,18 @@ class PriceFilterEngine(private val context: Context) {
                         rejectedNodes.forEach { it.recycle() }
                         
                         if (matchingNodes.isNotEmpty()) {
-                            // Prioritize clickable nodes or nodes with clickable parents
-                            var bestNode = matchingNodes.find { it.isClickable }
-                            if (bestNode == null) {
-                                bestNode = matchingNodes.find {
-                                    var hasClickableParent = false
-                                    var parent = it.parent
-                                    while (parent != null) {
-                                        if (parent.isClickable) {
-                                            hasClickableParent = true
-                                            parent.recycle()
-                                            break
-                                        }
-                                        val temp = parent.parent
-                                        parent.recycle()
-                                        parent = temp
-                                    }
-                                    hasClickableParent
-                                }
-                            }
-                            val node = bestNode ?: matchingNodes[0]
+                            val sortedNodes = matchingNodes.map { node ->
+                                val rect = Rect()
+                                node.getBoundsInScreen(rect)
+                                val area = rect.width() * rect.height()
+                                Triple(node, area, isClickableOrHasClickableParent(node))
+                            }.sortedWith(
+                                compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
+                                    .thenBy { it.second }
+                            )
+
+                            val bestTriple = sortedNodes.firstOrNull()
+                            val node = bestTriple?.first ?: matchingNodes[0]
                             val rect = Rect()
                             node.getBoundsInScreen(rect)
                             
