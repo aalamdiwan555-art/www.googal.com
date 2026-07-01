@@ -164,7 +164,7 @@ class FloatingWindowService : Service() {
     }
 
     private fun setupMainPanel() {
-        mainLifecycleOwner = MyLifecycleOwner().apply { onCreate() }
+        mainLifecycleOwner = MyLifecycleOwner().apply { onCreate(); onStart(); onResume() }
 
         mainParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -219,7 +219,7 @@ class FloatingWindowService : Service() {
         )
         sequencePoints.add(action)
 
-        val lifeOwner = MyLifecycleOwner().apply { onCreate() }
+        val lifeOwner = MyLifecycleOwner().apply { onCreate(); onStart(); onResume() }
         sequenceLifecycleOwners.add(lifeOwner)
 
         val params = WindowManager.LayoutParams(
