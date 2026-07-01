@@ -352,6 +352,10 @@ class PriceFilterEngine(private val context: Context) {
 
     // ── Reject ────────────────────────────────────────────────────────────────
 
+    /** Called directly from AutoClickService fast-path — public alias. */
+    suspend fun triggerRejectPublic(service: AutoClickService, config: PriceConfig) =
+        triggerReject(service, config)
+
     private suspend fun triggerReject(service: AutoClickService, config: PriceConfig): Boolean {
         val root = service.rootInActiveWindow ?: return false
         try {
