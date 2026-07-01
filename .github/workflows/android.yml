@@ -21,6 +21,9 @@ on:
 permissions:
   contents: write
 
+env:
+  GRADLE_VERSION: '9.3.1'
+
 jobs:
   build:
     name: Build Android APK
@@ -38,17 +41,28 @@ jobs:
           distribution: zulu
           java-version: '17'
 
-      - name: Cache Gradle
+      - name: Cache Gradle home
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-
+            ~/.gradle/wrapper/dists
+            /opt/gradle
+          key: ${{ runner.os }}-gradle-${{ env.GRADLE_VERSION }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-${{ env.GRADLE_VERSION }}-
 
-      - name: Grant Gradle Wrapper Permissions
-        run: chmod +x gradlew
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          if [ ! -f "/opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle" ]; then
+            echo "Downloading Gradle ${GRADLE_VERSION}..."
+            curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              -o /tmp/gradle.zip
+            sudo mkdir -p /opt/gradle
+            sudo unzip -q /tmp/gradle.zip -d /opt/gradle
+            rm /tmp/gradle.zip
+          fi
+          echo "/opt/gradle/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
+          /opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle --version
 
       - name: Prepare .env stub
         run: |
@@ -90,7 +104,8 @@ jobs:
           github.event.inputs.build_type == 'debug' ||
           github.event.inputs.build_type == 'both'
         run: |
-          ./gradlew assembleDebug \
+          gradle assembleDebug \
+            --project-dir . \
             --parallel \
             --build-cache \
             --no-daemon \
@@ -111,9 +126,10 @@ jobs:
             echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
             export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
           else
-            echo "::warning::No keystore secret — building unsigned release APK."
+            echo "::warning::No keystore — building unsigned release APK."
           fi
-          ./gradlew assembleRelease \
+          gradle assembleRelease \
+            --project-dir . \
             --parallel \
             --build-cache \
             --no-daemon \
