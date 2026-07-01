@@ -4,76 +4,61 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Point
 import android.graphics.Rect
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.data.models.PriceConfig
-import kotlinx.coroutines.delay
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
-import kotlin.random.Random
 
 class PriceFilterEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "PriceFilterEngine"
 
-        // ── Compiled once, reused forever across all calls/instances ──
+        // Max attempts to find the Accept button per trigger (Bug 3 fix)
+        private const val ACCEPT_RETRY_ATTEMPTS = 6
+        // Gap between retries in ms — minimal, just enough for the next UI frame
+        private const val ACCEPT_RETRY_DELAY_MS = 50L
 
-        // Matches: optional label + currency symbol + price number
+        // ── Compiled-once regexes ──────────────────────────────────────────────
+
         private val PRICE_REGEX = Regex(
             """(?:Price|Fare|Earn|Est\.|Total|Cost)?\s*[₹$€£]\s*([\d,]+(?:\.\d+)?)""",
             RegexOption.IGNORE_CASE
         )
-
-        // Matches bare decimal/integer numbers
         private val NUMBER_REGEX = Regex("""\b(\d+(?:\.\d+)?)\b""")
-
-        // Matches distances like "5.2 km", "3 kms", "2 mi", "1.5 miles"
         private val DISTANCE_REGEX = Regex("""(\d+(?:\.\d+)?)\s*(?:[Kk]m[sS]?|[Mm]i(?:les?)?)""")
-
-        // Distance unit prefixes (checked after bare numbers)
         private val DISTANCE_UNITS = arrayOf("km", "kms", "mi", "mile", "miles")
 
-        // Default accept keywords — deduplicated, longest-first for early match
         val DEFAULT_ACCEPT_TERMS = listOf(
             "Accept Ride", "Tap to Accept", "Let's Go",
             "Accept", "Confirm", "Take", "Agree", "Book", "Start", "Go"
         )
-
-        // Default reject keywords
         val DEFAULT_REJECT_TERMS = listOf(
             "Decline Ride", "No thanks", "Decline", "Reject", "Skip", "Cancel", "Ignore", "X"
         )
 
-        // Word-boundary regex cache for short terms (≤ 4 chars) — avoids recompiling per call
         private val wordBoundaryRegexCache = ConcurrentHashMap<String, Regex>()
-
         private fun wordBoundaryRegex(term: String): Regex =
             wordBoundaryRegexCache.getOrPut(term) {
                 Regex("\\b${Regex.escape(term)}\\b", RegexOption.IGNORE_CASE)
             }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Public extraction helpers
-    // ──────────────────────────────────────────────────────────────────────────
+    // ── Public extraction helpers ─────────────────────────────────────────────
 
     fun extractPriceFromText(text: String): Double? {
-        // Primary: currency-symbol match
         val match = PRICE_REGEX.find(text)
-        if (match != null) {
-            return match.groupValues[1].replace(",", "").toDoubleOrNull()
-        }
-        // Fallback: first bare number that isn't a distance
+        if (match != null) return match.groupValues[1].replace(",", "").toDoubleOrNull()
         for (num in NUMBER_REGEX.findAll(text)) {
             val d = num.groupValues[1].toDoubleOrNull() ?: continue
             if (d <= 1.0) continue
-            val afterSub = text.substring(num.range.last + 1).trimStart()
-            if (DISTANCE_UNITS.any { afterSub.startsWith(it, ignoreCase = true) }) continue
+            val after = text.substring(num.range.last + 1).trimStart()
+            if (DISTANCE_UNITS.any { after.startsWith(it, ignoreCase = true) }) continue
             return d
         }
         return null
@@ -81,9 +66,10 @@ class PriceFilterEngine(private val context: Context) {
 
     fun extractDistancesFromText(text: String): Pair<Double?, Double?> {
         val matches = DISTANCE_REGEX.findAll(text).toList()
-        val pickup = matches.getOrNull(0)?.groupValues?.get(1)?.toDoubleOrNull()
-        val drop   = matches.getOrNull(1)?.groupValues?.get(1)?.toDoubleOrNull()
-        return Pair(pickup, drop)
+        return Pair(
+            matches.getOrNull(0)?.groupValues?.get(1)?.toDoubleOrNull(),
+            matches.getOrNull(1)?.groupValues?.get(1)?.toDoubleOrNull()
+        )
     }
 
     fun shouldClick(screenText: String, config: PriceConfig): Boolean {
@@ -92,9 +78,7 @@ class PriceFilterEngine(private val context: Context) {
         return price >= config.minPrice && price <= config.maxPrice
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Core evaluation — called on every accessibility event
-    // ──────────────────────────────────────────────────────────────────────────
+    // ── Core evaluation ───────────────────────────────────────────────────────
 
     suspend fun evaluateAndProcessScreen(
         screenText: String,
@@ -103,26 +87,24 @@ class PriceFilterEngine(private val context: Context) {
     ): Boolean {
         if (!config.enabled) return false
 
-        // Build accept term list once (custom > default)
         val acceptTerms = buildAcceptTerms(config)
-
         val hasAcceptKeyword = acceptTerms.any { screenText.contains(it, ignoreCase = true) }
-        val price   = extractPriceFromText(screenText)
+        val price = extractPriceFromText(screenText)
         val hasPrice = price != null
 
-        // Template match only if no text signal at all
+        // Template match only when no text signal at all
         var hasTemplateMatch = false
         val templates = config.getTemplates()
         if (!hasPrice && !hasAcceptKeyword && templates.isNotEmpty()) {
             val screenshot = captureScreenshot(service, context)
             if (screenshot != null) {
                 for (item in templates) {
-                    val templateFile = File(item.imagePath)
-                    if (!templateFile.exists()) continue
-                    val templateBitmap = BitmapFactory.decodeFile(templateFile.absolutePath) ?: continue
-                    val matchPoint = TemplateMatcher.findTemplateMatch(screenshot, templateBitmap)
-                    templateBitmap.recycle()
-                    if (matchPoint != null) { hasTemplateMatch = true; break }
+                    val f = File(item.imagePath)
+                    if (!f.exists()) continue
+                    val bmp = BitmapFactory.decodeFile(f.absolutePath) ?: continue
+                    val match = TemplateMatcher.findTemplateMatch(screenshot, bmp)
+                    bmp.recycle()
+                    if (match != null) { hasTemplateMatch = true; break }
                 }
                 screenshot.recycle()
             }
@@ -130,17 +112,12 @@ class PriceFilterEngine(private val context: Context) {
 
         if (!hasPrice && !hasAcceptKeyword && !hasTemplateMatch) return false
 
-        // Log detection
-        if (hasPrice) {
-            RideAutomationLogger.log("Detected Incoming Ride! 🏷️ Price: ${config.currencySymbol}$price")
-        } else {
-            RideAutomationLogger.log("Detected Incoming Ride! (Evaluating keywords & matching filters)")
-        }
+        if (hasPrice) RideAutomationLogger.log("Detected Incoming Ride! 🏷️ Price: ${config.currencySymbol}$price")
+        else RideAutomationLogger.log("Detected Incoming Ride! (Evaluating keywords & filters)")
 
-        // ── Distance check ──
+        // ── Distance check ────────────────────────────────────────────────────
         val (pickupDist, dropDist) = extractDistancesFromText(screenText)
-        var distanceMatched = true
-        var distanceRejectReason = ""
+        var distanceMatched = true; var distanceRejectReason = ""
 
         if (pickupDist != null) {
             val bypass = config.minPickupDistance == 0.0 && config.maxPickupDistance == 0.0
@@ -150,12 +127,8 @@ class PriceFilterEngine(private val context: Context) {
                     distanceMatched = false
                     distanceRejectReason = "Pickup ${pickupDist} Km outside range (${config.minPickupDistance}–${config.maxPickupDistance} Km)"
                 }
-            } else {
-                RideAutomationLogger.log("Parsed Pickup Distance: ${pickupDist} Km (filter bypassed: 0.0–0.0)")
-            }
-        } else {
-            RideAutomationLogger.log("Parsed Pickup Distance: None detected")
-        }
+            } else RideAutomationLogger.log("Parsed Pickup Distance: ${pickupDist} Km (filter bypassed: 0.0–0.0)")
+        } else RideAutomationLogger.log("Parsed Pickup Distance: None detected")
 
         if (dropDist != null && distanceMatched) {
             val bypass = config.minDropDistance == 0.0 && config.maxDropDistance == 0.0
@@ -165,14 +138,10 @@ class PriceFilterEngine(private val context: Context) {
                     distanceMatched = false
                     distanceRejectReason = "Drop ${dropDist} Km outside range (${config.minDropDistance}–${config.maxDropDistance} Km)"
                 }
-            } else {
-                RideAutomationLogger.log("Parsed Drop Distance: ${dropDist} Km (filter bypassed: 0.0–0.0)")
-            }
-        } else if (dropDist == null) {
-            RideAutomationLogger.log("Parsed Drop Distance: None detected")
-        }
+            } else RideAutomationLogger.log("Parsed Drop Distance: ${dropDist} Km (filter bypassed: 0.0–0.0)")
+        } else if (dropDist == null) RideAutomationLogger.log("Parsed Drop Distance: None detected")
 
-        // ── Keyword check ──
+        // ── Keyword check ─────────────────────────────────────────────────────
         var keywordMatched = true
         if (config.pickupKeywords.isNotBlank() || config.dropKeywords.isNotBlank()) {
             val pickupKws = config.pickupKeywords.splitToSequence(",").map { it.trim() }.filter { it.isNotEmpty() }.toList()
@@ -187,24 +156,21 @@ class PriceFilterEngine(private val context: Context) {
             }
         }
 
-        // ── Decision ──
-        val isPriceBelowMin  = hasPrice && price!! < config.minPrice
-        val isPriceAboveMax  = hasPrice && config.maxPrice != Double.MAX_VALUE && price!! > config.maxPrice
-        val shouldAccept     = !isPriceBelowMin && !isPriceAboveMax && keywordMatched && distanceMatched
+        // ── Decision ──────────────────────────────────────────────────────────
+        val isPriceBelowMin = hasPrice && price!! < config.minPrice
+        val isPriceAboveMax = hasPrice && config.maxPrice != Double.MAX_VALUE && price!! > config.maxPrice
+        val shouldAccept = !isPriceBelowMin && !isPriceAboveMax && keywordMatched && distanceMatched
 
         return if (shouldAccept) {
-            if (hasPrice) {
-                RideAutomationLogger.log("✅ RIDE MATCHED! Price ${config.currencySymbol}$price meets criteria.")
-            } else {
-                RideAutomationLogger.log("✅ RIDE MATCHED! Location and Accept filters satisfied.")
-            }
+            if (hasPrice) RideAutomationLogger.log("✅ RIDE MATCHED! Price ${config.currencySymbol}$price meets criteria.")
+            else RideAutomationLogger.log("✅ RIDE MATCHED! Location and Accept filters satisfied.")
             val accepted = triggerAccept(service, config, screenText)
             if (accepted) RideAutomationLogger.recordAccept(price ?: 0.0, config.currencySymbol)
             accepted
         } else {
             val reason = when {
-                isPriceBelowMin -> "Price ${config.currencySymbol}$price below min ${config.currencySymbol}${config.minPrice}"
-                isPriceAboveMax -> "Price ${config.currencySymbol}$price exceeds max ${config.currencySymbol}${config.maxPrice}"
+                isPriceBelowMin  -> "Price ${config.currencySymbol}$price below min ${config.currencySymbol}${config.minPrice}"
+                isPriceAboveMax  -> "Price ${config.currencySymbol}$price exceeds max ${config.currencySymbol}${config.maxPrice}"
                 !distanceMatched -> distanceRejectReason
                 !keywordMatched  -> "Location keywords did not match criteria"
                 else             -> "Does not meet filters"
@@ -215,9 +181,7 @@ class PriceFilterEngine(private val context: Context) {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Accept
-    // ──────────────────────────────────────────────────────────────────────────
+    // ── Accept (Bugs 3 + 5 fixed) ─────────────────────────────────────────────
 
     private suspend fun triggerAccept(
         service: AutoClickService,
@@ -226,131 +190,167 @@ class PriceFilterEngine(private val context: Context) {
     ): Boolean {
         val templates = config.getTemplates()
 
-        // 1. Template image matching
+        // 1. Template image matching (no retry needed — screenshot is instantaneous)
         if (templates.isNotEmpty()) {
             RideAutomationLogger.log("🔍 Scanning with ${templates.size} Accept Button template(s)...")
             val screenshot = captureScreenshot(service, context)
             if (screenshot != null) {
                 for ((index, item) in templates.withIndex()) {
-                    val templateFile = File(item.imagePath)
-                    if (!templateFile.exists()) continue
-                    val templateBitmap = BitmapFactory.decodeFile(templateFile.absolutePath) ?: continue
-                    val matchPoint = TemplateMatcher.findTemplateMatch(screenshot, templateBitmap)
+                    val f = File(item.imagePath); if (!f.exists()) continue
+                    val bmp = BitmapFactory.decodeFile(f.absolutePath) ?: continue
+                    val matchPoint = TemplateMatcher.findTemplateMatch(screenshot, bmp)
                     if (matchPoint != null) {
-                        // Optional: verify button text is also on screen
                         if (item.buttonText.isNotBlank()) {
-                            val textOnScreen = screenText.contains(item.buttonText, ignoreCase = true)
-                            var hasTextNode = false
-                            val root = service.rootInActiveWindow
-                            if (root != null) {
-                                try {
-                                    val nodes = root.findAccessibilityNodeInfosByText(item.buttonText)
-                                    hasTextNode = !nodes.isNullOrEmpty()
-                                    nodes?.forEach { it.recycle() }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Template text node check failed", e)
-                                } finally {
-                                    root.recycle()
-                                }
+                            val onScreen = screenText.contains(item.buttonText, ignoreCase = true)
+                            if (!onScreen) {
+                                RideAutomationLogger.log("🔍 Template #${index+1} matched but text '${item.buttonText}' absent — skipping.")
+                                bmp.recycle(); continue
                             }
-                            if (!textOnScreen && !hasTextNode) {
-                                RideAutomationLogger.log("🔍 Template #${index + 1} image matched but text '${item.buttonText}' not on screen — skipping.")
-                                templateBitmap.recycle()
-                                continue
-                            }
-                            RideAutomationLogger.log("✨ Perfect match! Template #${index + 1} image + text '${item.buttonText}' verified.")
+                            RideAutomationLogger.log("✨ Template #${index+1} + text '${item.buttonText}' verified.")
                         } else {
-                            RideAutomationLogger.log("🎯 Match! Template #${index + 1} image matched (no text filter).")
+                            RideAutomationLogger.log("🎯 Template #${index+1} matched (no text filter).")
                         }
-
-                        val clickX = (matchPoint.x + templateBitmap.width  / 2).toFloat()
-                        val clickY = (matchPoint.y + templateBitmap.height / 2).toFloat()
-                        RideAutomationLogger.log("⚡ Clicking Accept template at ($clickX, $clickY)")
-                        service.clickAt(clickX, clickY)
-                        templateBitmap.recycle()
-                        screenshot.recycle()
+                        val cx = (matchPoint.x + bmp.width  / 2).toFloat()
+                        val cy = (matchPoint.y + bmp.height / 2).toFloat()
+                        RideAutomationLogger.log("⚡ Clicking Accept template at ($cx, $cy)")
+                        service.clickAt(cx, cy)
+                        bmp.recycle(); screenshot.recycle()
                         return true
                     }
-                    templateBitmap.recycle()
+                    bmp.recycle()
                 }
                 screenshot.recycle()
             }
             RideAutomationLogger.log("⚠️ Template matching failed — falling back to accessibility click.")
         }
 
-        // 2. Accessibility text matching
+        // 2. Accessibility matching with retry (Bug 3 fix)
+        //    Each attempt re-reads the live tree so it catches the button appearing late (Bug 1 fix)
         val acceptTerms = buildAcceptTerms(config)
-        val root = service.rootInActiveWindow ?: run {
-            RideAutomationLogger.log("❌ Failed to click Accept: root window unavailable.")
-            return false
-        }
-        try {
-            for (term in acceptTerms) {
-                val rawNodes = root.findAccessibilityNodeInfosByText(term) ?: continue
-                if (rawNodes.isEmpty()) continue
 
-                val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
-                val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
-
-                for (node in rawNodes) {
-                    if (!node.isVisibleToUser) { rejectedNodes.add(node); continue }
-                    val r = Rect()
-                    node.getBoundsInScreen(r)
-                    if (r.width() <= 0 || r.height() <= 0) { rejectedNodes.add(node); continue }
-                    val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
-                    if (isStrictMatch(nodeText, term)) matchingNodes.add(node) else rejectedNodes.add(node)
-                }
-                rejectedNodes.forEach { it.recycle() }
-
-                if (matchingNodes.isEmpty()) continue
-
-                // Pick best node: prefer clickable, then smallest area (exact button vs container)
-                val best = matchingNodes.minWithOrNull(
-                    compareBy({ !isClickableOrHasClickableParent(it) }, {
-                        val r = Rect(); it.getBoundsInScreen(r); r.width() * r.height()
-                    })
-                ) ?: matchingNodes[0]
-
-                val rect = Rect()
-                best.getBoundsInScreen(rect)
-                val cx = rect.centerX().toFloat()
-                val cy = rect.centerY().toFloat()
-
-                RideAutomationLogger.log("⚡ Accept '$term' found — dual-dispatching click at ($cx, $cy)")
-                service.clickAt(cx, cy)
-                try {
-                    if (best.isClickable) {
-                        best.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    } else {
-                        var parent = best.parent
-                        while (parent != null) {
-                            if (parent.isClickable) {
-                                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                parent.recycle(); break
-                            }
-                            val next = parent.parent
-                            parent.recycle(); parent = next
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Direct node ACTION_CLICK failed", e)
-                }
-                matchingNodes.forEach { it.recycle() }
-                return true
+        repeat(ACCEPT_RETRY_ATTEMPTS) { attempt ->
+            // On retries, wait one UI frame before re-reading the tree
+            if (attempt > 0) {
+                kotlinx.coroutines.delay(ACCEPT_RETRY_DELAY_MS)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in accessibility accept matching", e)
-        } finally {
-            root.recycle()
+
+            val root = service.rootInActiveWindow ?: run {
+                Log.w(TAG, "rootInActiveWindow null on attempt ${attempt+1}")
+                return@repeat
+            }
+
+            try {
+                // ── Pass A: findAccessibilityNodeInfosByText for each accept term ──
+                for (term in acceptTerms) {
+                    val rawNodes = root.findAccessibilityNodeInfosByText(term) ?: continue
+                    if (rawNodes.isEmpty()) continue
+
+                    val best = rawNodes.filter { node ->
+                        node.isVisibleToUser && service.boundsNonEmpty(node) &&
+                        isAnyTextMatch(node, term)
+                    }.minWithOrNull(
+                        compareBy({ !service.isClickableOrHasClickableParent(it) }, { service.area(it) })
+                    )
+
+                    rawNodes.filter { it != best }.forEach { it.recycle() }
+
+                    if (best != null) {
+                        val rect = Rect(); best.getBoundsInScreen(rect)
+                        RideAutomationLogger.log("⚡ Accept '$term' — dual-click at (${rect.centerX()}, ${rect.centerY()}) [attempt ${attempt+1}]")
+                        service.performDualClick(best)
+                        best.recycle()
+                        root.recycle()
+                        return true
+                    }
+                }
+
+                // ── Pass B: Bug 5 fix — full tree walk for custom views ──────────
+                //    Matches on contentDescription / hintText / tooltipText that
+                //    findAccessibilityNodeInfosByText() would miss entirely
+                val treeMatch = findAcceptNodeInTree(root, acceptTerms, service)
+                if (treeMatch != null) {
+                    val rect = Rect(); treeMatch.getBoundsInScreen(rect)
+                    RideAutomationLogger.log("⚡ Accept (tree-walk) — dual-click at (${rect.centerX()}, ${rect.centerY()}) [attempt ${attempt+1}]")
+                    service.performDualClick(treeMatch)
+                    treeMatch.recycle()
+                    root.recycle()
+                    return true
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Accept attempt ${attempt+1} error", e)
+            } finally {
+                try { root.recycle() } catch (_: Exception) {}
+            }
+
+            RideAutomationLogger.log("🔄 Accept button not found (attempt ${attempt+1}/$ACCEPT_RETRY_ATTEMPTS) — retrying...")
         }
 
-        RideAutomationLogger.log("❌ Failed to click Accept: button not found on screen.")
+        RideAutomationLogger.log("❌ Failed to click Accept after $ACCEPT_RETRY_ATTEMPTS attempts.")
         return false
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Reject
-    // ──────────────────────────────────────────────────────────────────────────
+    /**
+     * Bug 5 fix: full tree walk that checks ALL text attributes including
+     * contentDescription, hintText, tooltipText — invisible to findAccessibilityNodeInfosByText().
+     * Returns the best matching node (caller must recycle it).
+     */
+    private fun findAcceptNodeInTree(
+        root: AccessibilityNodeInfo,
+        acceptTerms: List<String>,
+        service: AutoClickService
+    ): AccessibilityNodeInfo? {
+        val candidates = mutableListOf<AccessibilityNodeInfo>()
+        collectAcceptCandidates(root, acceptTerms, service, candidates)
+        if (candidates.isEmpty()) return null
+        val best = candidates.minWithOrNull(
+            compareBy({ !service.isClickableOrHasClickableParent(it) }, { service.area(it) })
+        )
+        candidates.filter { it != best }.forEach { try { it.recycle() } catch (_: Exception) {} }
+        return best
+    }
+
+    private fun collectAcceptCandidates(
+        node: AccessibilityNodeInfo?,
+        acceptTerms: List<String>,
+        service: AutoClickService,
+        out: MutableList<AccessibilityNodeInfo>
+    ) {
+        if (node == null) return
+        try {
+            if (node.isVisibleToUser && service.boundsNonEmpty(node)) {
+                val matched = acceptTerms.any { term -> isAnyTextMatch(node, term) }
+                if (matched) {
+                    out.add(node)
+                    return // don't recurse into matched subtree
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
+                collectAcceptCandidates(child, acceptTerms, service, out)
+                // Note: don't recycle child here — it may be added to `out`
+            }
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Checks ALL text attributes of a node against a term:
+     * text, contentDescription, hintText (API 26+), tooltipText (API 28+).
+     * This is what makes Bug 5 disappear.
+     */
+    private fun isAnyTextMatch(node: AccessibilityNodeInfo, term: String): Boolean {
+        node.text?.toString()?.let { if (isStrictMatch(it, term)) return true }
+        node.contentDescription?.toString()?.let { if (isStrictMatch(it, term)) return true }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            node.hintText?.toString()?.let { if (isStrictMatch(it, term)) return true }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            node.tooltipText?.toString()?.let { if (isStrictMatch(it, term)) return true }
+        }
+        return false
+    }
+
+    // ── Reject ────────────────────────────────────────────────────────────────
 
     private suspend fun triggerReject(service: AutoClickService, config: PriceConfig): Boolean {
         val root = service.rootInActiveWindow ?: return false
@@ -359,60 +359,25 @@ class PriceFilterEngine(private val context: Context) {
                 val rawNodes = root.findAccessibilityNodeInfosByText(term) ?: continue
                 if (rawNodes.isEmpty()) continue
 
-                val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
-                val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
+                val best = rawNodes.filter { node ->
+                    node.isVisibleToUser && service.boundsNonEmpty(node) &&
+                    isAnyTextMatch(node, term)
+                }.minWithOrNull(
+                    compareBy({ !service.isClickableOrHasClickableParent(it) }, { service.area(it) })
+                )
 
-                for (node in rawNodes) {
-                    if (!node.isVisibleToUser) { rejectedNodes.add(node); continue }
-                    val r = Rect()
-                    node.getBoundsInScreen(r)
-                    if (r.width() <= 0 || r.height() <= 0) { rejectedNodes.add(node); continue }
-                    val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
-                    if (isStrictMatch(nodeText, term)) matchingNodes.add(node) else rejectedNodes.add(node)
+                rawNodes.filter { it != best }.forEach { it.recycle() }
+
+                if (best != null) {
+                    val rect = Rect(); best.getBoundsInScreen(rect)
+                    RideAutomationLogger.log("🚫 Reject '$term' — clicking at (${rect.centerX()}, ${rect.centerY()})")
+                    service.performDualClick(best)
+                    best.recycle()
+                    return true
                 }
-                rejectedNodes.forEach { it.recycle() }
-
-                if (matchingNodes.isEmpty()) continue
-
-                val best = matchingNodes.minWithOrNull(
-                    compareBy({ !isClickableOrHasClickableParent(it) }, {
-                        val r = Rect(); it.getBoundsInScreen(r); r.width() * r.height()
-                    })
-                ) ?: matchingNodes[0]
-
-                val rect = Rect()
-                best.getBoundsInScreen(rect)
-                val w = rect.width().coerceAtLeast(1)
-                val h = rect.height().coerceAtLeast(1)
-                val clickX = rect.left + (w * 0.1f + Random.nextInt((w * 0.8f).toInt().coerceAtLeast(1))).toInt()
-                val clickY = rect.top  + (h * 0.1f + Random.nextInt((h * 0.8f).toInt().coerceAtLeast(1))).toInt()
-
-                val delayMs = Random.nextLong(config.randomClickDelayMinMs, config.randomClickDelayMaxMs + 1)
-                RideAutomationLogger.log("🚫 Reject '$term' in ${delayMs}ms at ($clickX, $clickY)")
-                delay(delayMs)
-                service.clickAt(clickX.toFloat(), clickY.toFloat())
-                try {
-                    if (best.isClickable) {
-                        best.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    } else {
-                        var parent = best.parent
-                        while (parent != null) {
-                            if (parent.isClickable) {
-                                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                parent.recycle(); break
-                            }
-                            val next = parent.parent
-                            parent.recycle(); parent = next
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Direct node ACTION_CLICK on reject failed", e)
-                }
-                matchingNodes.forEach { it.recycle() }
-                return true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error in accessibility reject matching", e)
+            Log.e(TAG, "Reject matching error", e)
         } finally {
             root.recycle()
         }
@@ -420,9 +385,7 @@ class PriceFilterEngine(private val context: Context) {
         return false
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Helpers
-    // ──────────────────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun buildAcceptTerms(config: PriceConfig): List<String> {
         val terms = mutableListOf<String>()
@@ -430,41 +393,24 @@ class PriceFilterEngine(private val context: Context) {
             terms.addAll(config.acceptButtonKeywords.splitToSequence(",").map { it.trim() }.filter { it.isNotEmpty() })
         }
         if (terms.isEmpty()) terms.addAll(DEFAULT_ACCEPT_TERMS)
-        // Prepend any template button text (highest priority)
         config.getTemplates().forEach { item ->
-            if (item.buttonText.isNotBlank() && !terms.contains(item.buttonText)) {
-                terms.add(0, item.buttonText)
-            }
+            if (item.buttonText.isNotBlank() && !terms.contains(item.buttonText)) terms.add(0, item.buttonText)
         }
         return terms
     }
 
     private fun isStrictMatch(nodeText: String, term: String): Boolean {
-        val clean = nodeText.trim()
-        val t     = term.trim()
-        if (clean.equals(t, ignoreCase = true)) return true
-        if (t.length <= 4) return wordBoundaryRegex(t).containsMatchIn(clean)
-        return clean.contains(t, ignoreCase = true)
+        val c = nodeText.trim(); val t = term.trim()
+        if (c.equals(t, ignoreCase = true)) return true
+        if (t.length <= 4) return wordBoundaryRegex(t).containsMatchIn(c)
+        return c.contains(t, ignoreCase = true)
     }
 
-    private fun isClickableOrHasClickableParent(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable) return true
-        var parent = node.parent
-        while (parent != null) {
-            if (parent.isClickable) { parent.recycle(); return true }
-            val next = parent.parent
-            parent.recycle(); parent = next
-        }
-        return false
-    }
-
-    // ──────────────────────────────────────────────────────────────────────────
-    //  Screenshot capture (Android R+)
-    // ──────────────────────────────────────────────────────────────────────────
+    // ── Screenshot (Android R+) ───────────────────────────────────────────────
 
     private suspend fun captureScreenshot(service: AutoClickService, context: Context): Bitmap? =
         suspendCoroutine { continuation ->
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     service.takeScreenshot(
                         android.view.Display.DEFAULT_DISPLAY,
@@ -477,13 +423,13 @@ class PriceFilterEngine(private val context: Context) {
                                 continuation.resume(bitmap?.copy(Bitmap.Config.ARGB_8888, false).also { bitmap?.recycle() })
                             }
                             override fun onFailure(errorCode: Int) {
-                                Log.e(TAG, "Screenshot capture failed: $errorCode")
+                                Log.e(TAG, "Screenshot failed: $errorCode")
                                 continuation.resume(null)
                             }
                         }
                     )
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error taking screenshot", e)
+                    Log.e(TAG, "Screenshot exception", e)
                     continuation.resume(null)
                 }
             } else {

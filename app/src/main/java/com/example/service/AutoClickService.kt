@@ -10,14 +10,18 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.util.Log
+import com.example.data.models.ClickConfig
+import com.example.data.models.PriceConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
 
 class AutoClickService : AccessibilityService() {
 
@@ -27,25 +31,31 @@ class AutoClickService : AccessibilityService() {
             private set
 
         val lastScannedText = kotlinx.coroutines.flow.MutableStateFlow("")
+
+        // After a successful accept, ignore new events for this many ms to prevent double-clicks
+        private const val ACCEPT_COOLDOWN_MS = 2500L
     }
 
-    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var lastProcessedText: String = ""
-    private var lastProcessedTime: Long = 0L
-    @Volatile private var isProcessing: Boolean = false
+    // IO dispatcher — zero artificial delay, never blocks the accessibility thread
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Reuse a single PriceFilterEngine instance — stateless, no need to recreate on every event
+    // Bug 2 fix: cancel-and-relaunch — never drops events, never blocks processing
+    @Volatile private var pendingEvalJob: Job? = null
+
+    // Bug 1 fix: cooldown ONLY after a confirmed successful accept, not after every scan
+    @Volatile private var lastAcceptTimeMs: Long = 0L
+
+    // Pre-allocated StringBuilder — avoids GC pressure on every text collection
+    private val textBuilderLock = Any()
+    private val textBuilder = StringBuilder(8192)
+
+    // Single reused PriceFilterEngine — stateless, safe to share
     private val priceFilterEngine by lazy { PriceFilterEngine(this) }
 
-    // Pre-allocated StringBuilder — avoids GC pressure on every screen text collection
-    private val textBuilder = StringBuilder(4096)
-
-    // Accelerometer variables for vibration detection
+    // Accelerometer / vibration detection
     private var sensorManager: SensorManager? = null
     private var accelerometer: Sensor? = null
-    private var lastX = 0f
-    private var lastY = 0f
-    private var lastZ = 0f
+    private var lastX = 0f; private var lastY = 0f; private var lastZ = 0f
     private var lastSampleTime = 0L
     private var vibrationSamples = 0
     private var lastVibrationTriggerTime = 0L
@@ -58,56 +68,29 @@ class AutoClickService : AccessibilityService() {
             if (!config.priceConfig.vibrationTriggerEnabled) return
 
             val now = System.currentTimeMillis()
-            val x = event.values[0]
-            val y = event.values[1]
-            val z = event.values[2]
-
-            if (lastSampleTime > 0) {
-                val dt = now - lastSampleTime
-                if (dt >= 10) {
-                    val dx = Math.abs(x - lastX)
-                    val dy = Math.abs(y - lastY)
-                    val dz = Math.abs(z - lastZ)
-                    val delta = dx + dy + dz
-
-                    // Vibration is high-frequency, low-magnitude acceleration spikes
-                    if (delta in 0.08f..4.5f) {
-                        vibrationSamples++
-                        if (vibrationSamples >= 3) {
-                            if (now - lastVibrationTriggerTime > 400L) {
-                                lastVibrationTriggerTime = now
-                                vibrationSamples = 0
-                                onVibrationDetected()
-                            }
-                        }
-                    } else {
-                        if (vibrationSamples > 0) vibrationSamples--
+            val x = event.values[0]; val y = event.values[1]; val z = event.values[2]
+            if (lastSampleTime > 0 && (now - lastSampleTime) >= 10) {
+                val delta = Math.abs(x - lastX) + Math.abs(y - lastY) + Math.abs(z - lastZ)
+                if (delta in 0.08f..4.5f) {
+                    if (++vibrationSamples >= 3 && now - lastVibrationTriggerTime > 400L) {
+                        lastVibrationTriggerTime = now; vibrationSamples = 0
+                        onVibrationDetected()
                     }
+                } else {
+                    if (vibrationSamples > 0) vibrationSamples--
                 }
             }
-            lastX = x
-            lastY = y
-            lastZ = z
-            lastSampleTime = now
+            lastX = x; lastY = y; lastZ = z; lastSampleTime = now
         }
-
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
     private fun onVibrationDetected() {
         val config = ClickEngine.currentConfig ?: return
-        RideAutomationLogger.log("📳 Mobile Vibration Detected! Device is vibrating (incoming ride alert). Increasing alertness and forcing immediate screen template/text match...")
-        
+        RideAutomationLogger.log("📳 Vibration detected — forcing immediate screen evaluation")
         val screenText = getAllScreenText()
         if (screenText.isBlank()) return
-        
-        serviceScope.launch {
-            try {
-                priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
-            } catch (e: Exception) {
-                Log.e("AutoClickService", "Vibration-triggered screen matching failed", e)
-            }
-        }
+        scheduleEvaluation(screenText, config)
     }
 
     override fun onServiceConnected() {
@@ -118,23 +101,18 @@ class AutoClickService : AccessibilityService() {
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
             accelerometer?.let {
                 sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_FASTEST)
-                Log.d("AutoClickService", "Registered accelerometer sensor listener (FASTEST rate) for vibration detection")
             }
         } catch (e: Exception) {
-            Log.e("AutoClickService", "Failed to register accelerometer sensor listener", e)
+            Log.e("AutoClickService", "Accelerometer registration failed", e)
         }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val eventType = event?.eventType ?: return
-        
-        // Filter out events from our own application to prevent self-clicking/recursion
-        val eventPackage = event.packageName?.toString()
-        if (eventPackage == packageName) {
-            return
-        }
 
-        // React to every UI change event for maximum speed
+        // Never process our own app's events
+        if (event.packageName?.toString() == packageName) return
+
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
@@ -142,136 +120,74 @@ class AutoClickService : AccessibilityService() {
             eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED &&
             eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED &&
             eventType != AccessibilityEvent.TYPE_ANNOUNCEMENT
-        ) {
-            return
-        }
+        ) return
 
         val config = ClickEngine.currentConfig ?: return
         if (!config.priceConfig.enabled) return
 
-        // Skip if already processing — prevents queue pileup under rapid events
-        if (isProcessing) return
+        // Bug 1 fix: only block during post-accept cooldown, not during processing
+        if (System.currentTimeMillis() - lastAcceptTimeMs < ACCEPT_COOLDOWN_MS) return
 
         val screenText = getAllScreenText()
-        if (screenText.isNotBlank()) {
-            lastScannedText.value = screenText
-        }
-
-        val now = System.currentTimeMillis()
         if (screenText.isBlank()) return
+        lastScannedText.value = screenText
 
-        // 200ms cooldown only if text is identical (changed content always fires immediately)
-        if (screenText == lastProcessedText && (now - lastProcessedTime) < 200L) {
-            return
-        }
+        // Bug 2 fix: cancel previous job, launch fresh — zero blocking, zero dropped events
+        scheduleEvaluation(screenText, config)
+    }
 
-        lastProcessedText = screenText
-        lastProcessedTime = now
-        isProcessing = true
-
-        serviceScope.launch {
+    private fun scheduleEvaluation(screenText: String, config: ClickConfig) {
+        pendingEvalJob?.cancel()
+        pendingEvalJob = serviceScope.launch {
             try {
-                priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
+                val accepted = priceFilterEngine.evaluateAndProcessScreen(
+                    screenText, config.priceConfig, this@AutoClickService
+                )
+                if (accepted) lastAcceptTimeMs = System.currentTimeMillis()
             } catch (e: Exception) {
-                Log.e("AutoClickService", "Error evaluating screen in accessibility service", e)
-            } finally {
-                isProcessing = false
+                Log.e("AutoClickService", "Screen evaluation error", e)
             }
         }
     }
 
-    override fun onInterrupt() {
-        // Not used, but required to override
-    }
-
-    private fun unregisterSensor() {
-        try {
-            sensorManager?.unregisterListener(sensorListener)
-            Log.d("AutoClickService", "Unregistered accelerometer sensor listener")
-        } catch (e: Exception) {
-            Log.e("AutoClickService", "Failed to unregister accelerometer sensor listener", e)
-        }
-    }
+    override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
-        unregisterSensor()
+        try { sensorManager?.unregisterListener(sensorListener) } catch (_: Exception) {}
+        serviceScope.cancel()
         instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        unregisterSensor()
+        try { sensorManager?.unregisterListener(sensorListener) } catch (_: Exception) {}
+        serviceScope.cancel()
         instance = null
         super.onDestroy()
     }
 
-    fun clickAt(x: Float, y: Float, durationMs: Long = 1L, onComplete: (() -> Unit)? = null) {
-        val path = Path().apply {
-            moveTo(x, y)
-            lineTo(x, y)
-        }
-        val gestureBuilder = GestureDescription.Builder()
-        val strokeDescription = GestureDescription.StrokeDescription(path, 0, durationMs)
-        gestureBuilder.addStroke(strokeDescription)
+    // ── Gesture helpers ──────────────────────────────────────────────────────
 
-        dispatchGesture(gestureBuilder.build(), object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                super.onCompleted(gestureDescription)
-                onComplete?.invoke()
-            }
-            override fun onCancelled(gestureDescription: GestureDescription?) {
-                super.onCancelled(gestureDescription)
-                onComplete?.invoke()
-            }
+    fun clickAt(x: Float, y: Float, durationMs: Long = 1L, onComplete: (() -> Unit)? = null) {
+        val path = Path().apply { moveTo(x, y); lineTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) { onComplete?.invoke() }
+            override fun onCancelled(g: GestureDescription?) { onComplete?.invoke() }
         }, null)
     }
 
-    private fun isStrictMatch(nodeText: String, term: String): Boolean {
-        val cleanNodeText = nodeText.trim()
-        val cleanTerm = term.trim()
-        if (cleanNodeText.equals(cleanTerm, ignoreCase = true)) {
-            return true
-        }
-        if (cleanTerm.length <= 4) {
-            val regex = Regex("\\b${Regex.escape(cleanTerm)}\\b", RegexOption.IGNORE_CASE)
-            return regex.containsMatchIn(cleanNodeText)
-        }
-        return cleanNodeText.contains(cleanTerm, ignoreCase = true)
-    }
-
-    private fun isClickableOrHasClickableParent(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable) return true
-        var parent = node.parent
-        while (parent != null) {
-            if (parent.isClickable) {
-                parent.recycle()
-                return true
-            }
-            val nextParent = parent.parent
-            parent.recycle()
-            parent = nextParent
-        }
-        return false
-    }
-
-    fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300L, onComplete: (() -> Unit)? = null) {
-        val path = Path().apply {
-            moveTo(startX, startY)
-            lineTo(endX, endY)
-        }
-        val gestureBuilder = GestureDescription.Builder()
-        val strokeDescription = GestureDescription.StrokeDescription(path, 0, durationMs)
-        gestureBuilder.addStroke(strokeDescription)
-
-        dispatchGesture(gestureBuilder.build(), object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                super.onCompleted(gestureDescription)
-                onComplete?.invoke()
-            }
-            override fun onCancelled(gestureDescription: GestureDescription?) {
-                super.onCancelled(gestureDescription)
-                onComplete?.invoke()
-            }
+    fun swipe(startX: Float, startY: Float, endX: Float, endY: Float,
+              durationMs: Long = 200L, onComplete: (() -> Unit)? = null) {
+        val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) { onComplete?.invoke() }
+            override fun onCancelled(g: GestureDescription?) { onComplete?.invoke() }
         }, null)
     }
 
@@ -281,167 +197,124 @@ class AutoClickService : AccessibilityService() {
             if (!viewId.isNullOrBlank()) {
                 val nodes = root.findAccessibilityNodeInfosByViewId(viewId)
                 if (!nodes.isNullOrEmpty()) {
-                    val visibleNodes = nodes.filter { node ->
-                        if (!node.isVisibleToUser) return@filter false
-                        val r = Rect()
-                        node.getBoundsInScreen(r)
-                        r.width() > 0 && r.height() > 0
-                    }
-                    if (visibleNodes.isNotEmpty()) {
-                        val sortedNodes = visibleNodes.map { node ->
-                            val rect = Rect()
-                            node.getBoundsInScreen(rect)
-                            val area = rect.width() * rect.height()
-                            Triple(node, area, isClickableOrHasClickableParent(node))
-                        }.sortedWith(
-                            compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
-                                .thenBy { it.second }
-                        )
-
-                        val bestTriple = sortedNodes.firstOrNull()
-                        val node = bestTriple?.first ?: visibleNodes[0]
-                        val rect = Rect()
-                        node.getBoundsInScreen(rect)
-                        
-                        // Human-like physical click at center
-                        clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
-                        
-                        // Direct action click (including parents)
-                        try {
-                            if (node.isClickable) {
-                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            } else {
-                                var parent = node.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                        parent.recycle()
-                                        break
-                                    }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e("AutoClickService", "Direct viewId click failed", e)
-                        }
-                        
-                        nodes.forEach { it.recycle() }
-                        return true
-                    }
+                    val best = nodes.filter { it.isVisibleToUser && boundsNonEmpty(it) }
+                        .minWithOrNull(compareBy({ !isClickableOrHasClickableParent(it) }, { area(it) }))
+                    if (best != null) { performDualClick(best); nodes.forEach { it.recycle() }; return true }
                     nodes.forEach { it.recycle() }
                 }
             }
-
             if (!text.isNullOrBlank()) {
                 val rawNodes = root.findAccessibilityNodeInfosByText(text)
                 if (!rawNodes.isNullOrEmpty()) {
-                    val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
-                    val rejectedNodes = mutableListOf<AccessibilityNodeInfo>()
-                    for (node in rawNodes) {
-                        if (!node.isVisibleToUser) {
-                            rejectedNodes.add(node)
-                            continue
-                        }
-                        val r = Rect()
-                        node.getBoundsInScreen(r)
-                        if (r.width() <= 0 || r.height() <= 0) {
-                            rejectedNodes.add(node)
-                            continue
-                        }
-                        val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
-                        if (isStrictMatch(nodeText, text)) {
-                            matchingNodes.add(node)
-                        } else {
-                            rejectedNodes.add(node)
-                        }
-                    }
-                    
-                    rejectedNodes.forEach { it.recycle() }
-                    
-                    if (matchingNodes.isNotEmpty()) {
-                        val sortedNodes = matchingNodes.map { node ->
-                            val rect = Rect()
-                            node.getBoundsInScreen(rect)
-                            val area = rect.width() * rect.height()
-                            Triple(node, area, isClickableOrHasClickableParent(node))
-                        }.sortedWith(
-                            compareBy<Triple<AccessibilityNodeInfo, Int, Boolean>> { !it.third }
-                                .thenBy { it.second }
-                        )
-
-                        val bestTriple = sortedNodes.firstOrNull()
-                        val node = bestTriple?.first ?: matchingNodes[0]
-                        val rect = Rect()
-                        node.getBoundsInScreen(rect)
-                        
-                        // Human-like physical click at center
-                        clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
-                        
-                        // Direct action click (including parents)
-                        try {
-                            if (node.isClickable) {
-                                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            } else {
-                                var parent = node.parent
-                                while (parent != null) {
-                                    if (parent.isClickable) {
-                                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                        parent.recycle()
-                                        break
-                                    }
-                                    val temp = parent.parent
-                                    parent.recycle()
-                                    parent = temp
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e("AutoClickService", "Direct text click failed", e)
-                        }
-                        
-                        matchingNodes.forEach { it.recycle() }
-                        return true
-                    }
+                    val best = rawNodes.filter {
+                        it.isVisibleToUser && boundsNonEmpty(it) && isStrictMatch(nodeDisplayText(it), text)
+                    }.minWithOrNull(compareBy({ !isClickableOrHasClickableParent(it) }, { area(it) }))
+                    if (best != null) { performDualClick(best); rawNodes.forEach { it.recycle() }; return true }
+                    rawNodes.forEach { it.recycle() }
                 }
             }
         } catch (e: Exception) {
-            Log.e("AutoClickService", "Error clicking accessibility element", e)
+            Log.e("AutoClickService", "findAndClickElement error", e)
         } finally {
             root.recycle()
         }
-
         return false
     }
 
+    // ── Screen text collection ────────────────────────────────────────────────
+    // Bug 4 fix: hintText (API 26+) and tooltipText (API 28+) are now included
+
     fun getAllScreenText(): String {
         val root = rootInActiveWindow ?: return ""
-        textBuilder.setLength(0)            // reset without reallocation
-        try {
-            traverseAndCollectText(root, textBuilder)
-        } finally {
-            root.recycle()
+        return synchronized(textBuilderLock) {
+            textBuilder.setLength(0)
+            try { traverseAndCollectText(root, textBuilder) } finally { root.recycle() }
+            textBuilder.toString()
         }
-        return textBuilder.toString()
     }
 
-    private fun traverseAndCollectText(node: AccessibilityNodeInfo?, sb: StringBuilder) {
+    fun traverseAndCollectText(node: AccessibilityNodeInfo?, sb: StringBuilder) {
         if (node == null) return
         try {
             if (node.isVisibleToUser) {
-                val text = node.text
-                if (!text.isNullOrBlank()) sb.append(text).append('\n')
-                val desc = node.contentDescription
-                if (!desc.isNullOrBlank()) sb.append(desc).append('\n')
+                node.text?.takeIf { it.isNotBlank() }?.let { sb.append(it).append('\n') }
+                node.contentDescription?.takeIf { it.isNotBlank() }?.let { sb.append(it).append('\n') }
+                // Bug 4 fix: hintText — API 26+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    node.hintText?.takeIf { it.isNotBlank() }?.let { sb.append(it).append('\n') }
+                }
+                // Bug 4 fix: tooltipText — API 28+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    node.tooltipText?.takeIf { it.isNotBlank() }?.let { sb.append(it).append('\n') }
+                }
             }
-            val count = node.childCount
-            for (i in 0 until count) {
+            for (i in 0 until node.childCount) {
                 val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
                 traverseAndCollectText(child, sb)
-                try { child.recycle() } catch (_: Exception) { }
+                try { child.recycle() } catch (_: Exception) {}
             }
-        } catch (_: Exception) {
-            // node invalidated asynchronously — safe to ignore
+        } catch (_: Exception) {}
+    }
+
+    // ── Shared utilities ─────────────────────────────────────────────────────
+
+    fun isStrictMatch(nodeText: String, term: String): Boolean {
+        val c = nodeText.trim(); val t = term.trim()
+        if (c.equals(t, ignoreCase = true)) return true
+        if (t.length <= 4) return Regex("\\b${Regex.escape(t)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(c)
+        return c.contains(t, ignoreCase = true)
+    }
+
+    fun isClickableOrHasClickableParent(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable) return true
+        var parent = node.parent
+        while (parent != null) {
+            if (parent.isClickable) { parent.recycle(); return true }
+            val next = parent.parent; parent.recycle(); parent = next
+        }
+        return false
+    }
+
+    /** Returns the best human-visible label for a node across all text attributes. */
+    fun nodeDisplayText(node: AccessibilityNodeInfo): String {
+        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            node.hintText?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            node.tooltipText?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return ""
+    }
+
+    fun boundsNonEmpty(node: AccessibilityNodeInfo): Boolean {
+        val r = Rect(); node.getBoundsInScreen(r); return r.width() > 0 && r.height() > 0
+    }
+
+    fun area(node: AccessibilityNodeInfo): Int {
+        val r = Rect(); node.getBoundsInScreen(r); return r.width() * r.height()
+    }
+
+    /** Gesture tap + ACTION_CLICK on the node (or first clickable parent). */
+    fun performDualClick(node: AccessibilityNodeInfo) {
+        val rect = Rect(); node.getBoundsInScreen(rect)
+        clickAt(rect.centerX().toFloat(), rect.centerY().toFloat())
+        try {
+            if (node.isClickable) {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } else {
+                var parent = node.parent
+                while (parent != null) {
+                    if (parent.isClickable) {
+                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        parent.recycle(); break
+                    }
+                    val next = parent.parent; parent.recycle(); parent = next
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AutoClickService", "performDualClick action failed", e)
         }
     }
 }

@@ -72,8 +72,9 @@ object ClickEngine {
                 // Price filter mode: AutoClickService handles this reactively on every UI change event.
                 // ClickEngine must NOT also call evaluateAndProcessScreen — that causes double clicks.
                 if (config.priceConfig.enabled) {
-                    // Just keep the engine alive; actual scanning is done by AutoClickService.onAccessibilityEvent
-                    delay(maxOf(50L, config.intervalMs))
+                    // Yield briefly so the coroutine doesn't spin-burn the CPU; actual scanning
+                    // is done by AutoClickService.onAccessibilityEvent with zero blocking.
+                    delay(10L)
                     continue
                 }
 
