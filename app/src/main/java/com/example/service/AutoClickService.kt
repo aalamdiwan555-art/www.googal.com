@@ -29,9 +29,10 @@ class AutoClickService : AccessibilityService() {
         val lastScannedText = kotlinx.coroutines.flow.MutableStateFlow("")
     }
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var lastProcessedText: String = ""
     private var lastProcessedTime: Long = 0L
+    @Volatile private var isProcessing: Boolean = false
 
     // Accelerometer variables for vibration detection
     private var sensorManager: SensorManager? = null
@@ -64,17 +65,17 @@ class AutoClickService : AccessibilityService() {
                     val delta = dx + dy + dz
 
                     // Vibration is high-frequency, low-magnitude acceleration spikes
-                    if (delta in 0.12f..3.5f) {
+                    if (delta in 0.08f..4.5f) {
                         vibrationSamples++
-                        if (vibrationSamples >= 6) {
-                            if (now - lastVibrationTriggerTime > 1500L) {
+                        if (vibrationSamples >= 3) {
+                            if (now - lastVibrationTriggerTime > 400L) {
                                 lastVibrationTriggerTime = now
                                 vibrationSamples = 0
                                 onVibrationDetected()
                             }
                         }
                     } else {
-                        vibrationSamples = Math.max(0, vibrationSamples - 1)
+                        if (vibrationSamples > 0) vibrationSamples--
                     }
                 }
             }
@@ -111,8 +112,8 @@ class AutoClickService : AccessibilityService() {
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
             accelerometer?.let {
-                sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME)
-                Log.d("AutoClickService", "Registered accelerometer sensor listener for vibration detection")
+                sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_FASTEST)
+                Log.d("AutoClickService", "Registered accelerometer sensor listener (FASTEST rate) for vibration detection")
             }
         } catch (e: Exception) {
             Log.e("AutoClickService", "Failed to register accelerometer sensor listener", e)
@@ -128,32 +129,40 @@ class AutoClickService : AccessibilityService() {
             return
         }
 
-        // Filter for relevant events to optimize performance and prevent excessive CPU usage
+        // React to every UI change event for maximum speed
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-            eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED &&
+            eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_ANNOUNCEMENT
         ) {
             return
         }
+
+        val config = ClickEngine.currentConfig ?: return
+        if (!config.priceConfig.enabled) return
+
+        // Skip if already processing — prevents queue pileup under rapid events
+        if (isProcessing) return
 
         val screenText = getAllScreenText()
         if (screenText.isNotBlank()) {
             lastScannedText.value = screenText
         }
 
-        val config = ClickEngine.currentConfig ?: return
-        if (!config.priceConfig.enabled) return
-
         val now = System.currentTimeMillis()
         if (screenText.isBlank()) return
-        
-        // Use a cooldown of 1.5 seconds if the screen text hasn't changed to prevent duplicate triggers
-        if (screenText == lastProcessedText && (now - lastProcessedTime) < 1500L) {
+
+        // 200ms cooldown only if text is identical (changed content always fires immediately)
+        if (screenText == lastProcessedText && (now - lastProcessedTime) < 200L) {
             return
         }
 
         lastProcessedText = screenText
         lastProcessedTime = now
+        isProcessing = true
 
         serviceScope.launch {
             try {
@@ -161,6 +170,8 @@ class AutoClickService : AccessibilityService() {
                 engine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
             } catch (e: Exception) {
                 Log.e("AutoClickService", "Error evaluating screen in accessibility service", e)
+            } finally {
+                isProcessing = false
             }
         }
     }

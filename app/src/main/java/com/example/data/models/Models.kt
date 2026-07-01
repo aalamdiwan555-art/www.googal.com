@@ -58,7 +58,7 @@ data class PriceConfig(
 }
 
 data class ClickConfig(
-    val intervalMs: Long = 500,
+    val intervalMs: Long = 100,
     val maxClicks: Int = 0, // 0 = unlimited
     val clickMode: ClickMode = ClickMode.FIXED_POINT,
     val clickType: ClickType = ClickType.SINGLE,

@@ -23,7 +23,7 @@ object ClickEngine {
     val clickCount: StateFlow<Int> = _clickCount.asStateFlow()
 
     private var job: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     // Tracks last touched/target coordinates
     var targetPoint = PointF(500f, 1000f)
@@ -77,9 +77,9 @@ object ClickEngine {
                     if (screenText.isNotBlank()) {
                         priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, service)
                     }
-                    // Standard radar scan interval delay
+                    // Standard radar scan interval delay (minimum 5ms)
                     val delayMs = config.intervalMs
-                    delay(maxOf(50L, delayMs))
+                    delay(maxOf(5L, delayMs))
                     continue
                 }
 
