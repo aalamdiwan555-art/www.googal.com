@@ -34,6 +34,12 @@ class AutoClickService : AccessibilityService() {
     private var lastProcessedTime: Long = 0L
     @Volatile private var isProcessing: Boolean = false
 
+    // Reuse a single PriceFilterEngine instance — stateless, no need to recreate on every event
+    private val priceFilterEngine by lazy { PriceFilterEngine(this) }
+
+    // Pre-allocated StringBuilder — avoids GC pressure on every screen text collection
+    private val textBuilder = StringBuilder(4096)
+
     // Accelerometer variables for vibration detection
     private var sensorManager: SensorManager? = null
     private var accelerometer: Sensor? = null
@@ -97,8 +103,7 @@ class AutoClickService : AccessibilityService() {
         
         serviceScope.launch {
             try {
-                val engine = PriceFilterEngine(this@AutoClickService)
-                engine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
+                priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
             } catch (e: Exception) {
                 Log.e("AutoClickService", "Vibration-triggered screen matching failed", e)
             }
@@ -166,8 +171,7 @@ class AutoClickService : AccessibilityService() {
 
         serviceScope.launch {
             try {
-                val engine = PriceFilterEngine(this@AutoClickService)
-                engine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
+                priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, this@AutoClickService)
             } catch (e: Exception) {
                 Log.e("AutoClickService", "Error evaluating screen in accessibility service", e)
             } finally {
@@ -412,49 +416,32 @@ class AutoClickService : AccessibilityService() {
 
     fun getAllScreenText(): String {
         val root = rootInActiveWindow ?: return ""
-        val sb = StringBuilder()
+        textBuilder.setLength(0)            // reset without reallocation
         try {
-            traverseAndCollectText(root, sb)
+            traverseAndCollectText(root, textBuilder)
         } finally {
             root.recycle()
         }
-        return sb.toString()
+        return textBuilder.toString()
     }
 
     private fun traverseAndCollectText(node: AccessibilityNodeInfo?, sb: StringBuilder) {
         if (node == null) return
         try {
             if (node.isVisibleToUser) {
-                node.text?.let {
-                    if (it.isNotBlank()) {
-                        sb.append(it).append("\n")
-                    }
-                }
-                node.contentDescription?.let {
-                    if (it.isNotBlank()) {
-                        sb.append(it).append("\n")
-                    }
-                }
+                val text = node.text
+                if (!text.isNullOrBlank()) sb.append(text).append('\n')
+                val desc = node.contentDescription
+                if (!desc.isNullOrBlank()) sb.append(desc).append('\n')
             }
             val count = node.childCount
             for (i in 0 until count) {
-                var child: AccessibilityNodeInfo? = null
-                try {
-                    child = node.getChild(i)
-                } catch (e: Exception) {
-                    // Ignore child fetching error for dynamic/stale nodes
-                }
-                if (child != null) {
-                    traverseAndCollectText(child, sb)
-                    try {
-                        child.recycle()
-                    } catch (e: Exception) {
-                        // Ignore recycling exception on stale nodes
-                    }
-                }
+                val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
+                traverseAndCollectText(child, sb)
+                try { child.recycle() } catch (_: Exception) { }
             }
-        } catch (e: Exception) {
-            // Safe fallback if nodes are invalidated asynchronously during traversal
+        } catch (_: Exception) {
+            // node invalidated asynchronously — safe to ignore
         }
     }
 }
