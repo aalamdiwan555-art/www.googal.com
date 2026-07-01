@@ -83,47 +83,45 @@ object ClickEngine {
                     continue
                 }
 
-                if (true) {
-                    when (config.clickMode) {
-                        ClickMode.FIXED_POINT -> {
-                            performSingleGesture(service, targetPoint.x, targetPoint.y, config.clickType)
-                        }
-                        ClickMode.FOLLOW_CURSOR -> {
-                            performSingleGesture(service, targetPoint.x, targetPoint.y, config.clickType)
-                        }
-                        ClickMode.TARGET_ELEMENT -> {
-                            val clicked = service.findAndClickElement(config.targetText, config.targetViewId)
-                            if (clicked) {
-                                _clickCount.value++
-                            }
-                        }
-                        ClickMode.SEQUENCE -> {
-                            val seq = activeSequence
-                            if (!seq.isNullOrEmpty()) {
-                                val action = seq[sequenceIndex]
-                                executeRecordedAction(service, action)
-                                _clickCount.value++
-                                sequenceIndex = (sequenceIndex + 1) % seq.size
-                                
-                                // Delay after action
-                                delay(action.delayAfterMs)
-                                continue // skip standard delay since sequence handles its own
-                            } else {
-                                stop()
-                                break
-                            }
+                when (config.clickMode) {
+                    ClickMode.FIXED_POINT -> {
+                        performSingleGesture(service, targetPoint.x, targetPoint.y, config.clickType)
+                    }
+                    ClickMode.FOLLOW_CURSOR -> {
+                        performSingleGesture(service, targetPoint.x, targetPoint.y, config.clickType)
+                    }
+                    ClickMode.TARGET_ELEMENT -> {
+                        val clicked = service.findAndClickElement(config.targetText, config.targetViewId)
+                        if (clicked) {
+                            _clickCount.value++
                         }
                     }
+                    ClickMode.SEQUENCE -> {
+                        val seq = activeSequence
+                        if (!seq.isNullOrEmpty()) {
+                            val action = seq[sequenceIndex]
+                            executeRecordedAction(service, action)
+                            _clickCount.value++
+                            sequenceIndex = (sequenceIndex + 1) % seq.size
+                            
+                            // Delay after action
+                            delay(action.delayAfterMs)
+                            continue // skip standard delay since sequence handles its own
+                        } else {
+                            stop()
+                            break
+                        }
+                    }
+                }
 
-                    if (config.clickMode != ClickMode.TARGET_ELEMENT) {
-                        _clickCount.value++
-                    }
+                if (config.clickMode != ClickMode.TARGET_ELEMENT) {
+                    _clickCount.value++
+                }
 
-                    // Check click limits
-                    if (config.maxClicks > 0 && _clickCount.value >= config.maxClicks) {
-                        stop()
-                        break
-                    }
+                // Check click limits
+                if (config.maxClicks > 0 && _clickCount.value >= config.maxClicks) {
+                    stop()
+                    break
                 }
 
                 // Standard delay

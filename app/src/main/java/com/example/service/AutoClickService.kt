@@ -189,7 +189,7 @@ class AutoClickService : AccessibilityService() {
         super.onDestroy()
     }
 
-    fun clickAt(x: Float, y: Float, durationMs: Long = 50L, onComplete: (() -> Unit)? = null) {
+    fun clickAt(x: Float, y: Float, durationMs: Long = 1L, onComplete: (() -> Unit)? = null) {
         val path = Path().apply {
             moveTo(x, y)
             lineTo(x, y)

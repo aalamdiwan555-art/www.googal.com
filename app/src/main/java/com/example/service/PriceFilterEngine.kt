@@ -275,13 +275,11 @@ class PriceFilterEngine(private val context: Context) {
                             RideAutomationLogger.log("🎯 Match found! Template #${index + 1} image matched perfectly (no text filter).")
                         }
 
-                        // Click inside template button bounds randomly
-                        val clickX = matchPoint.x + Random.nextInt(maxOf(1, (templateBitmap.width * 0.8).toInt())) + (templateBitmap.width * 0.1).toInt()
-                        val clickY = matchPoint.y + Random.nextInt(maxOf(1, (templateBitmap.height * 0.8).toInt())) + (templateBitmap.height * 0.1).toInt()
+                        // Click at exact center of matched template button
+                        val clickX = matchPoint.x + templateBitmap.width / 2
+                        val clickY = matchPoint.y + templateBitmap.height / 2
 
-                        val delayMs = Random.nextLong(1, 101) // Anti-detection random delay between 1ms and 100ms
-                        RideAutomationLogger.log("⚡ [Anti-Detection Delay] Delaying ${delayMs}ms before clicking Accept template at random offset ($clickX, $clickY)")
-                        delay(delayMs)
+                        RideAutomationLogger.log("⚡ Clicking Accept template at center ($clickX, $clickY)")
                         service.clickAt(clickX.toFloat(), clickY.toFloat())
                         templateBitmap.recycle()
                         screenshot.recycle()
@@ -357,13 +355,11 @@ class PriceFilterEngine(private val context: Context) {
                             val rect = Rect()
                             node.getBoundsInScreen(rect)
 
-                            // Click at random point inside bounds to simulate human finger touch (different positions)
-                            val clickX = rect.left + Random.nextInt(maxOf(1, (rect.width() * 0.8).toInt())) + (rect.width() * 0.1).toInt()
-                            val clickY = rect.top + Random.nextInt(maxOf(1, (rect.height() * 0.8).toInt())) + (rect.height() * 0.1).toInt()
+                            // Click at exact center of button for instant response
+                            val clickX = rect.centerX()
+                            val clickY = rect.centerY()
 
-                            val delayMs = Random.nextLong(1, 101) // Anti-detection random delay between 1ms and 100ms
-                            RideAutomationLogger.log("⚡ [Anti-Detection Delay] Accessibility element '$term' matched! Clicking Accept Button in ${delayMs}ms at random offset ($clickX, $clickY)")
-                            delay(delayMs)
+                            RideAutomationLogger.log("⚡ Accessibility element '$term' matched! Clicking Accept Button instantly at center ($clickX, $clickY)")
                             
                             // Dual-dispatch accept: physical tap + accessibility direct action click for 100% reliability
                             service.clickAt(clickX.toFloat(), clickY.toFloat())
