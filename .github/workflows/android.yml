@@ -2,27 +2,21 @@ name: Android CI/CD - Build & Release APK
 
 on:
   push:
-    branches: [ "main", "master" ]
-    tags:
-      - 'v*'
+    branches: ["main", "master"]
+    tags: ["v*"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build Type'
+        description: 'Build Type (debug / release / both)'
         required: true
         default: 'debug'
         type: choice
         options:
-          - 'debug'
-          - 'release'
-          - 'both'
-      create_release:
-        description: 'Create a GitHub Release?'
-        required: false
-        type: boolean
-        default: false
+          - debug
+          - release
+          - both
 
 permissions:
   contents: write
@@ -41,42 +35,30 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: zulu
           java-version: '17'
-          cache: 'gradle'
 
-      # ── Ultra-fast cache: Gradle wrapper + caches + Android build-cache ──
-      - name: Restore Gradle & Build Caches
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.android/build-cache
-            .gradle/configuration-cache
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-home-cache-cleanup: true
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
 
       - name: Grant Gradle Wrapper Permissions
         run: chmod +x gradlew
 
-      # ── Create .env so the Secrets Gradle Plugin doesn't fail ──
-      - name: Prepare .env
+      - name: Prepare .env stub
         run: |
           [ -f .env ] || touch .env
           grep -q "GEMINI_API_KEY" .env 2>/dev/null || echo "GEMINI_API_KEY=placeholder" >> .env
 
-      # ── Stub google-services.json so Firebase plugin doesn't crash ──
-      - name: Stub google-services.json (CI only)
+      - name: Stub google-services.json
         run: |
           if [ ! -f app/google-services.json ]; then
-            cat > app/google-services.json << 'GSJSON'
+            cat > app/google-services.json <<'EOF'
           {
             "project_info": {
               "project_number": "000000000000",
@@ -98,60 +80,47 @@ jobs:
             ],
             "configuration_version": "1"
           }
-          GSJSON
+          EOF
           fi
 
-      # ══════════════════════════════════════════════════════════════
-      #  DEBUG BUILD  — runs on every push / PR
-      # ══════════════════════════════════════════════════════════════
       - name: Build Debug APK
-        if: |
+        if: >-
           github.event_name == 'push' ||
           github.event_name == 'pull_request' ||
-          (github.event_name == 'workflow_dispatch' &&
-           (github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both'))
+          github.event.inputs.build_type == 'debug' ||
+          github.event.inputs.build_type == 'both'
         run: |
           ./gradlew assembleDebug \
             --parallel \
             --build-cache \
-            --configuration-cache \
             --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC" \
-            --stacktrace
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC"
 
-      # ══════════════════════════════════════════════════════════════
-      #  RELEASE BUILD  — runs on version tags or manual trigger
-      # ══════════════════════════════════════════════════════════════
       - name: Build Release APK
-        if: |
+        if: >-
           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-          (github.event_name == 'workflow_dispatch' &&
-           (github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both'))
+          github.event.inputs.build_type == 'release' ||
+          github.event.inputs.build_type == 'both'
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            echo "Decoding release keystore..."
             echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
             export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
           else
-            echo "::warning::No RELEASE_KEYSTORE_BASE64 secret — building unsigned release APK."
+            echo "::warning::No keystore secret — building unsigned release APK."
           fi
-
           ./gradlew assembleRelease \
             --parallel \
             --build-cache \
-            --configuration-cache \
             --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC" \
-            --stacktrace
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC"
 
-      # ══════════════════════════════════════════════════════════════
-      #  COLLECT ARTIFACTS
-      # ══════════════════════════════════════════════════════════════
-      - name: Collect & Rename APKs
+      - name: Collect APKs
         run: |
           mkdir -p build-artifacts
           for APK in \
@@ -162,75 +131,24 @@ jobs:
             BASE=$(basename "$APK")
             DEST="build-artifacts/AutoClickerPro-${BASE#app-}"
             cp "$APK" "$DEST"
-            echo "✅ $(du -sh "$DEST" | cut -f1)  →  $DEST"
+            echo "$(du -sh "$DEST" | cut -f1)  $DEST"
           done
-          echo "--- All artifacts ---"
-          ls -lh build-artifacts/ || echo "(none)"
+          ls -lh build-artifacts/ || echo "No APKs collected"
 
-      # ══════════════════════════════════════════════════════════════
-      #  RELEASE NOTES
-      # ══════════════════════════════════════════════════════════════
-      - name: Generate Release Notes
-        if: |
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
-        run: |
-          TAG="${{ github.ref_name }}"
-          DATE=$(date '+%Y-%m-%d')
-          cat > release_notes.md << EOF
-          ## AutoClicker Pro ${TAG} — ${DATE}
-
-          Built automatically by GitHub Actions CI/CD.
-
-          ### Features
-          - ⚡ Instant ride detection across 7 accessibility event types
-          - ✅ Dual-dispatch Accept click (gesture + accessibility action, 0 ms delay)
-          - 🚫 Smart Reject with configurable random delay
-          - 💰 Min **and** Max price filters — both correctly enforced
-          - 📍 Pickup & Drop distance filters (km ranges)
-          - 📳 Vibration sensor trigger (FASTEST rate, 3-sample threshold)
-          - 🔍 Image template matching for the Accept button
-          - 📊 Live session stats overlay (accepts / rejects / earnings)
-          - 🔒 Thread-safe logging, no double-click race conditions
-
-          ### How to Install
-          1. Download **AutoClickerPro-debug.apk** below
-          2. On your Android device: **Settings → Install unknown apps → Allow**
-          3. Tap the downloaded APK to install
-          4. Grant **Accessibility** and **Display over other apps** permissions when prompted
-          5. Open AutoClicker Pro and tap the toggle to activate
-
-          ### SHA-256 Checksums
-          \`\`\`
-          $(sha256sum build-artifacts/*.apk 2>/dev/null | sed 's|build-artifacts/||' || echo "N/A")
-          \`\`\`
-          EOF
-
-      # ══════════════════════════════════════════════════════════════
-      #  UPLOAD ARTIFACTS (always — for every build)
-      # ══════════════════════════════════════════════════════════════
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AutoClickerPro-APKs-${{ github.sha }}
+          name: AutoClickerPro-APKs-${{ github.run_number }}
           path: build-artifacts/
           retention-days: 30
           if-no-files-found: warn
 
-      # ══════════════════════════════════════════════════════════════
-      #  GITHUB RELEASE (tags or manual with create_release=true)
-      # ══════════════════════════════════════════════════════════════
       - name: Create GitHub Release
-        if: |
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build-artifacts/*.apk
-          body_path: release_notes.md
           draft: false
           prerelease: false
-          tag_name: ${{ github.ref_name || format('build-{0}', github.run_number) }}
-          name: AutoClicker Pro ${{ github.ref_name || format('Build #{0}', github.run_number) }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
