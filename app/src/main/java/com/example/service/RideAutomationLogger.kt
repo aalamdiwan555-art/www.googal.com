@@ -30,12 +30,15 @@ object RideAutomationLogger {
     fun log(message: String) {
         val timeStamp = dateFormat.format(Date())
         val formattedMsg = "[$timeStamp] $message"
-        val currentList = _logs.value.toMutableList()
-        currentList.add(0, formattedMsg)
-        if (currentList.size > 200) {
-            currentList.removeAt(currentList.lastIndex)
+        // Synchronized to prevent race conditions when multiple threads log concurrently
+        synchronized(this) {
+            val currentList = _logs.value.toMutableList()
+            currentList.add(0, formattedMsg)
+            if (currentList.size > 200) {
+                currentList.removeAt(currentList.lastIndex)
+            }
+            _logs.value = currentList
         }
-        _logs.value = currentList
     }
 
     fun recordAccept(price: Double, currencySymbol: String = "₹") {
