@@ -48,6 +48,7 @@ class AutoClickService : AccessibilityService() {
             if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
             val config = ClickEngine.currentConfig ?: return
             if (!config.priceConfig.enabled) return
+            if (!config.priceConfig.vibrationTriggerEnabled) return
 
             val now = System.currentTimeMillis()
             val x = event.values[0]

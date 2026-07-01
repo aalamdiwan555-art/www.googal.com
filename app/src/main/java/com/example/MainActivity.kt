@@ -472,6 +472,8 @@ fun PriceFilterConfigView(
 
     var minDelayText by remember { mutableStateOf(config.priceConfig.randomClickDelayMinMs.toString()) }
     var maxDelayText by remember { mutableStateOf(config.priceConfig.randomClickDelayMaxMs.toString()) }
+    var maxPriceText by remember { mutableStateOf(if (config.priceConfig.maxPrice == Double.MAX_VALUE) "" else config.priceConfig.maxPrice.toString()) }
+    var vibrationEnabled by remember { mutableStateOf(config.priceConfig.vibrationTriggerEnabled) }
 
     var isVisible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -518,6 +520,8 @@ fun PriceFilterConfigView(
         maxDropText = config.priceConfig.maxDropDistance.toString()
         minDelayText = config.priceConfig.randomClickDelayMinMs.toString()
         maxDelayText = config.priceConfig.randomClickDelayMaxMs.toString()
+        maxPriceText = if (config.priceConfig.maxPrice == Double.MAX_VALUE) "" else config.priceConfig.maxPrice.toString()
+        vibrationEnabled = config.priceConfig.vibrationTriggerEnabled
     }
 
     fun updateTemplates(newList: List<TemplateItem>) {
@@ -779,6 +783,121 @@ fun PriceFilterConfigView(
             }
         }
 
+        // Session Stats Dashboard
+        item {
+            AnimatedVisibility(
+                visible = isVisible,
+                enter = fadeIn(animationSpec = tween(500, delayMillis = 80)) + slideInVertically(
+                    initialOffsetY = { 40 },
+                    animationSpec = spring(stiffness = Spring.StiffnessLow)
+                )
+            ) {
+                val sessionStats by com.example.service.RideAutomationLogger.stats.collectAsState()
+                var tickMs by remember { mutableStateOf(System.currentTimeMillis()) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        delay(1000)
+                        tickMs = System.currentTimeMillis()
+                    }
+                }
+                val uptimeSecs = (tickMs - sessionStats.sessionStartMs) / 1000
+                val uptimeStr = if (uptimeSecs < 60) "${uptimeSecs}s"
+                    else if (uptimeSecs < 3600) "${uptimeSecs / 60}m ${uptimeSecs % 60}s"
+                    else "${uptimeSecs / 3600}h ${(uptimeSecs % 3600) / 60}m"
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF1A2744), Color(0xFF0D1B36))
+                            ),
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                        .border(1.dp, Color(0xFF2A3F6F), RoundedCornerShape(16.dp))
+                        .padding(16.dp)
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "📊 SESSION STATISTICS",
+                                color = Color(0xFF90CAF9),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "⏱ $uptimeStr",
+                                    color = Color(0xFF78909C),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                TextButton(
+                                    onClick = { com.example.service.RideAutomationLogger.resetSession() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Reset", color = Color(0xFF78909C), fontSize = 10.sp)
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            StatBox(
+                                icon = "✅",
+                                label = "Accepted",
+                                value = "${sessionStats.acceptCount}",
+                                valueColor = Color(0xFF66BB6A)
+                            )
+                            Box(modifier = Modifier.width(1.dp).height(40.dp).background(Color(0xFF2A3F6F)))
+                            StatBox(
+                                icon = "🚫",
+                                label = "Rejected",
+                                value = "${sessionStats.rejectCount}",
+                                valueColor = Color(0xFFEF5350)
+                            )
+                            Box(modifier = Modifier.width(1.dp).height(40.dp).background(Color(0xFF2A3F6F)))
+                            StatBox(
+                                icon = "💰",
+                                label = "Earnings",
+                                value = if (sessionStats.totalEarnings > 0) "₹${String.format("%.0f", sessionStats.totalEarnings)}" else "₹0",
+                                valueColor = Color(0xFFFFB74D)
+                            )
+                            Box(modifier = Modifier.width(1.dp).height(40.dp).background(Color(0xFF2A3F6F)))
+                            StatBox(
+                                icon = "🎯",
+                                label = "Hit Rate",
+                                value = run {
+                                    val total = sessionStats.acceptCount + sessionStats.rejectCount
+                                    if (total == 0) "—" else "${(sessionStats.acceptCount * 100 / total)}%"
+                                },
+                                valueColor = Color(0xFF80DEEA)
+                            )
+                        }
+                        if (sessionStats.lastAcceptedPrice > 0) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "Last accepted: ₹${String.format("%.2f", sessionStats.lastAcceptedPrice)}",
+                                color = Color(0xFF4DB6AC),
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 1st: Start switch
         item {
             AnimatedVisibility(
@@ -915,7 +1034,6 @@ fun PriceFilterConfigView(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                // Green blinking live dot
                                 val monitorScale by infiniteTransition.animateFloat(
                                     initialValue = 1.0f,
                                     targetValue = 1.8f,
@@ -955,7 +1073,7 @@ fun PriceFilterConfigView(
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "LIVE SCREEN MONITOR & LOGS",
+                                    text = "⚡ LIVE MONITOR & LOGS",
                                     color = Color.White,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
@@ -997,7 +1115,7 @@ fun PriceFilterConfigView(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "Live Match Logs",
+                                    text = "Live Logs (${liveLogs.size})",
                                     color = Color.White,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
@@ -1026,9 +1144,9 @@ fun PriceFilterConfigView(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(150.dp)
+                                .height(240.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF121214))
+                                .background(Color(0xFF0D0D10))
                                 .border(1.dp, Color(0xFF2C2C35), RoundedCornerShape(8.dp))
                                 .padding(8.dp)
                         ) {
@@ -1340,13 +1458,13 @@ fun PriceFilterConfigView(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "4. Minimum Ride Price",
+                            text = "4. Price Filter Range (₹)",
                             color = Color.Black,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Instantly reject any ride offering less than this value.",
+                            text = "Only accept rides within this price range. Leave Max blank for no upper limit.",
                             color = Color.DarkGray,
                             fontSize = 11.sp,
                             modifier = Modifier.padding(bottom = 12.dp)
@@ -1364,15 +1482,107 @@ fun PriceFilterConfigView(
                                     val doubleVal = clean.toDoubleOrNull() ?: 0.0
                                     viewModel.updatePriceConfig(config.priceConfig.copy(minPrice = doubleVal, currencySymbol = "₹"))
                                 },
-                                label = { Text("Min Price (₹)", color = Color.Gray) },
+                                label = { Text("Min Price (₹)", color = Color.Gray, fontSize = 11.sp) },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedTextColor = Color.Black,
                                     unfocusedTextColor = Color.Black,
-                                    focusedBorderColor = Color(0xFFFF9800),
+                                    focusedBorderColor = Color(0xFF4CAF50),
                                     unfocusedBorderColor = Color(0xFFE0E0E0)
                                 ),
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text("to", fontSize = 11.sp, color = Color.DarkGray)
+                            OutlinedTextField(
+                                value = maxPriceText,
+                                onValueChange = {
+                                    val clean = keepOnlyNumbersAndDecimal(it)
+                                    maxPriceText = clean
+                                    val doubleVal = if (clean.isBlank()) Double.MAX_VALUE else clean.toDoubleOrNull() ?: Double.MAX_VALUE
+                                    viewModel.updatePriceConfig(config.priceConfig.copy(maxPrice = doubleVal))
+                                },
+                                label = { Text("Max Price (₹)", color = Color.Gray, fontSize = 11.sp) },
+                                placeholder = { Text("No limit", color = Color(0xFFBBBBBB), fontSize = 11.sp) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.Black,
+                                    unfocusedTextColor = Color.Black,
+                                    focusedBorderColor = Color(0xFFEF5350),
+                                    unfocusedBorderColor = Color(0xFFE0E0E0)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4.5: Vibration Trigger & Smart Mode
+        item {
+            AnimatedVisibility(
+                visible = isVisible,
+                enter = fadeIn(animationSpec = tween(500, delayMillis = 450)) + slideInVertically(
+                    initialOffsetY = { 40 },
+                    animationSpec = spring(stiffness = Spring.StiffnessLow)
+                )
+            ) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F7)),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, Color(0xFFE0E0E0))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "4.5. Smart Detection Settings",
+                            color = Color.Black,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "📳 Vibration Trigger",
+                                    color = Color.Black,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Use phone vibration to instantly scan when a new ride arrives.",
+                                    color = Color.DarkGray,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = vibrationEnabled,
+                                onCheckedChange = {
+                                    vibrationEnabled = it
+                                    viewModel.updatePriceConfig(config.priceConfig.copy(vibrationTriggerEnabled = it))
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFFF9800))
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFFEFF8FF), RoundedCornerShape(8.dp))
+                                .border(1.dp, Color(0xFFBBDEFB), RoundedCornerShape(8.dp))
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                text = "ℹ️ Vibration detection works by reading the accelerometer sensor. When the phone vibrates from a new ride notification, it triggers an immediate screen scan — faster than the polling interval.",
+                                color = Color(0xFF1565C0),
+                                fontSize = 10.sp,
+                                lineHeight = 15.sp
                             )
                         }
                     }
@@ -1830,5 +2040,30 @@ fun GuidelinesView(
                 }
             }
         }
+    }
+}
+
+@Composable
+fun StatBox(icon: String, label: String, value: String, valueColor: Color) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier.padding(horizontal = 4.dp)
+    ) {
+        Text(text = icon, fontSize = 16.sp)
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
+        )
+        Text(
+            text = label,
+            color = Color(0xFF78909C),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.5.sp
+        )
     }
 }

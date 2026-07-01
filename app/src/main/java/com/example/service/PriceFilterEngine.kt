@@ -219,7 +219,11 @@ class PriceFilterEngine(private val context: Context) {
             } else {
                 RideAutomationLogger.log("✅ RIDE MATCHED! Location and Accept filters satisfied.")
             }
-            return triggerAccept(service, config, screenText)
+            val accepted = triggerAccept(service, config, screenText)
+            if (accepted) {
+                RideAutomationLogger.recordAccept(price ?: 0.0, config.currencySymbol)
+            }
+            return accepted
         } else {
             val reason = when {
                 isPriceBelowMin -> "Price ${config.currencySymbol}$price is below minimum ${config.currencySymbol}${config.minPrice}"
@@ -228,6 +232,7 @@ class PriceFilterEngine(private val context: Context) {
                 else -> "Does not meet filters"
             }
             RideAutomationLogger.log("🚫 REJECTING RIDE: $reason")
+            RideAutomationLogger.recordReject(reason)
             return triggerReject(service, config)
         }
     }

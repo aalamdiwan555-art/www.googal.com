@@ -68,6 +68,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 
 class FloatingWindowService : Service() {
 
@@ -286,7 +288,6 @@ class FloatingWindowService : Service() {
 
     @Composable
     fun MainControlPanel() {
-        // Pulse animations for the radar indicator
         val infiniteTransition = rememberInfiniteTransition(label = "stealth_radar")
         val pulseScale by infiniteTransition.animateFloat(
             initialValue = 1.0f,
@@ -307,13 +308,15 @@ class FloatingWindowService : Service() {
             label = "pulseAlpha"
         )
 
-        Row(
+        val stats by RideAutomationLogger.stats.collectAsState()
+
+        Column(
             modifier = Modifier
                 .wrapContentSize()
-                .shadow(4.dp, RoundedCornerShape(20.dp))
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color(0xE61E1E24)) // Dark, semi-transparent sleek charcoal background
-                .border(1.dp, Color(0xFF3A3A42), RoundedCornerShape(20.dp))
+                .shadow(6.dp, RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xF01E1E28))
+                .border(1.dp, Color(0xFF3A3A4A), RoundedCornerShape(16.dp))
                 .pointerInput(Unit) {
                     detectDragGestures { change, dragAmount ->
                         change.consume()
@@ -322,63 +325,76 @@ class FloatingWindowService : Service() {
                         windowManager.updateViewLayout(mainComposeView, mainParams)
                     }
                 }
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            // Pulsing Green Dot
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.size(20.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(20.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .graphicsLayer { scaleX = pulseScale; scaleY = pulseScale; alpha = pulseAlpha }
+                            .clip(CircleShape)
+                            .background(Color(0xFF4CAF50))
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF4CAF50))
+                    )
+                }
+
+                Text(
+                    text = "⚡ RIDE RADAR",
+                    color = Color(0xFF4CAF50),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+
+                Box(modifier = Modifier.width(1.dp).height(14.dp).background(Color(0xFF3A3A4A)))
+
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Stop",
+                    tint = Color(0xFFEF5350),
                     modifier = Modifier
                         .size(16.dp)
-                        .graphicsLayer {
-                            scaleX = pulseScale
-                            scaleY = pulseScale
-                            alpha = pulseAlpha
-                        }
                         .clip(CircleShape)
-                        .background(Color(0xFF4CAF50))
-                )
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF4CAF50))
+                        .clickable { stopSelf() }
                 )
             }
 
-            // Text Label
-            Text(
-                text = "AUTO RADAR ACTIVE",
-                color = Color.White,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp
-            )
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Small Vertical Divider
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(14.dp)
-                    .background(Color(0xFF3A3A42))
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                StatChip(label = "✅", value = "${stats.acceptCount}", color = Color(0xFF66BB6A))
+                StatChip(label = "🚫", value = "${stats.rejectCount}", color = Color(0xFFEF5350))
+                if (stats.totalEarnings > 0) {
+                    StatChip(label = "₹", value = String.format("%.0f", stats.totalEarnings), color = Color(0xFFFFB74D))
+                }
+            }
+        }
+    }
 
-            // Close button (Stop Service)
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = "Stop Service",
-                tint = Color(0xFFE57373),
-                modifier = Modifier
-                    .size(18.dp)
-                    .clip(CircleShape)
-                    .clickable {
-                        stopSelf()
-                    }
-            )
+    @Composable
+    fun StatChip(label: String, value: String, color: Color) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(color.copy(alpha = 0.15f))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(text = label, fontSize = 10.sp)
+            Text(text = value, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
         }
     }
 
