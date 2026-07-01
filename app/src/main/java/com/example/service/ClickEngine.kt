@@ -49,8 +49,6 @@ object ClickEngine {
         sequenceIndex = 0
         currentConfig = config
 
-        val priceFilterEngine = PriceFilterEngine(context)
-
         job = scope.launch {
             while (isActive && _isRunning.value) {
                 val service = AutoClickService.instance
@@ -71,15 +69,11 @@ object ClickEngine {
                     }
                 }
 
-                // Price filter check
+                // Price filter mode: AutoClickService handles this reactively on every UI change event.
+                // ClickEngine must NOT also call evaluateAndProcessScreen — that causes double clicks.
                 if (config.priceConfig.enabled) {
-                    val screenText = service.getAllScreenText()
-                    if (screenText.isNotBlank()) {
-                        priceFilterEngine.evaluateAndProcessScreen(screenText, config.priceConfig, service)
-                    }
-                    // Standard radar scan interval delay (minimum 5ms)
-                    val delayMs = config.intervalMs
-                    delay(maxOf(5L, delayMs))
+                    // Just keep the engine alive; actual scanning is done by AutoClickService.onAccessibilityEvent
+                    delay(maxOf(50L, config.intervalMs))
                     continue
                 }
 
